@@ -134,6 +134,43 @@ impl WorkspaceBackend for SwayBackend {
     }
 }
 
+const EVENT_WINDOW: u32 = 0x80000003;
+
+#[derive(Deserialize)]
+struct RawWindowEvent {
+    change: String,
+    container: Option<RawContainer>,
+}
+
+#[derive(Deserialize)]
+struct RawContainer {
+    name: Option<String>,
+    focused: bool,
+}
+
+pub fn parse_window_event(raw: &str) -> anyhow::Result<Option<String>> {
+    let ev: RawWindowEvent = serde_json::from_str(raw)?;
+    if ev.change == "focus" || ev.change == "title" {
+        Ok(ev.container.and_then(|c| if c.focused { c.name } else { None }))
+    } else {
+        Ok(None)
+    }
+}
+
+pub fn run_window_title_session(sink: async_channel::Sender<Option<String>>) -> anyhow::Result<()> {
+    let mut conn = SwayConn::connect()?;
+    conn.send(MSG_SUBSCRIBE, br#"["window"]"#)?;
+    let _ = conn.read_message()?; // ack
+    loop {
+        let (msg_type, payload) = conn.read_message()?;
+        if msg_type == EVENT_WINDOW {
+            if let Some(title) = parse_window_event(std::str::from_utf8(&payload)?)? {
+                sink.send_blocking(Some(title))?;
+            }
+        }
+    }
+}
+
 fn run_session(
     cmd_conn: &Arc<Mutex<Option<SwayConn>>>,
     sink: &EventSink,

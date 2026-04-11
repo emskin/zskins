@@ -5,11 +5,13 @@ use gpui::{
 };
 use zbar::backend::WorkspaceBackend;
 use zbar::modules::clock::ClockModule;
+use zbar::modules::window_title::WindowTitleModule;
 use zbar::modules::workspaces::WorkspacesModule;
 use zbar::theme;
 
 pub struct Bar {
     workspaces: Entity<WorkspacesModule>,
+    window_title: Entity<WindowTitleModule>,
     clock: Entity<ClockModule>,
 }
 
@@ -19,8 +21,9 @@ impl Bar {
         cx: &mut Context<Self>,
     ) -> Self {
         let workspaces = cx.new(|cx| WorkspacesModule::new(backend, cx));
+        let window_title = cx.new(WindowTitleModule::new);
         let clock = cx.new(ClockModule::new);
-        Bar { workspaces, clock }
+        Bar { workspaces, window_title, clock }
     }
 }
 
@@ -40,7 +43,7 @@ impl Render for Bar {
             )
             .child(
                 div().flex_1().flex().items_center().justify_center()
-                    .child("title")
+                    .child(self.window_title.clone())
             )
             .child(
                 div().flex_1().flex().items_center().justify_end()
