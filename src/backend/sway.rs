@@ -114,11 +114,17 @@ impl WorkspaceBackend for SwayBackend {
     fn run(&self, sink: EventSink, cx: &mut AsyncApp) -> Task<()> {
         let cmd_conn = self.cmd_conn.clone();
         cx.background_executor().spawn(async move {
-            match run_session(&cmd_conn, &sink) {
-                Ok(()) => log::info!("sway session ended cleanly"),
-                Err(e) => log::warn!("sway session error: {e:#}"),
+            let mut delay_ms: u64 = 1000;
+            loop {
+                match run_session(&cmd_conn, &sink) {
+                    Ok(()) => log::info!("sway session ended cleanly"),
+                    Err(e) => log::warn!("sway session error: {e:#}; reconnecting in {delay_ms}ms"),
+                }
+                *cmd_conn.lock().unwrap() = None;
+                let _ = sink.send_blocking(WorkspaceEvent::Disconnected);
+                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                delay_ms = (delay_ms * 2).min(30_000);
             }
-            let _ = sink.send_blocking(WorkspaceEvent::Disconnected);
         })
     }
 

@@ -18,8 +18,14 @@ impl WindowTitleModule {
         let (tx, rx) = async_channel::unbounded::<Option<String>>();
 
         cx.background_executor().spawn(async move {
-            if let Err(e) = run_window_title_session(tx) {
-                log::warn!("window-title session error: {e:#}");
+            let mut delay_ms: u64 = 1000;
+            loop {
+                match run_window_title_session(tx.clone()) {
+                    Ok(()) => {}
+                    Err(e) => log::warn!("window-title session error: {e:#}; reconnecting in {delay_ms}ms"),
+                }
+                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                delay_ms = (delay_ms * 2).min(30_000);
             }
         }).detach();
 

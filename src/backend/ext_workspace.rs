@@ -191,10 +191,16 @@ impl WorkspaceBackend for ExtWorkspaceBackend {
     fn run(&self, sink: EventSink, cx: &mut AsyncApp) -> Task<()> {
         let activate_request = self.activate_request.clone();
         cx.background_executor().spawn(async move {
-            if let Err(e) = run_session(sink.clone(), activate_request) {
-                log::warn!("ext-workspace session error: {e:#}");
+            let mut delay_ms: u64 = 1000;
+            loop {
+                match run_session(sink.clone(), activate_request.clone()) {
+                    Ok(()) => log::info!("ext-workspace session ended cleanly"),
+                    Err(e) => log::warn!("ext-workspace session error: {e:#}; reconnecting in {delay_ms}ms"),
+                }
+                let _ = sink.send_blocking(WorkspaceEvent::Disconnected);
+                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                delay_ms = (delay_ms * 2).min(30_000);
             }
-            let _ = sink.send_blocking(WorkspaceEvent::Disconnected);
         })
     }
 
