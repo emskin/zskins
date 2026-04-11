@@ -1,16 +1,13 @@
-mod backend;
 mod bar;
-mod modules;
-mod theme;
 
 use gpui::{
     App, AppContext, Bounds, Size, WindowBackgroundAppearance, WindowBounds, WindowKind,
     WindowOptions, layer_shell::*, point, px,
 };
 use gpui_platform::application;
+use zbar::theme::BAR_HEIGHT;
 
 use crate::bar::Bar;
-use crate::theme::BAR_HEIGHT;
 
 fn main() {
     env_logger::init();

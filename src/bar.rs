@@ -2,8 +2,8 @@ use gpui::{
     Context, Entity, IntoElement, ParentElement, Render, Styled, Window,
     div, prelude::*,
 };
-use crate::modules::clock::ClockModule;
-use crate::theme;
+use zbar::modules::clock::ClockModule;
+use zbar::theme;
 
 pub struct Bar {
     clock: Entity<ClockModule>,

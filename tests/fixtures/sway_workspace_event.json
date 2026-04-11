@@ -1,0 +1,5 @@
+{
+  "change": "focus",
+  "current": {"id": 2, "num": 2, "name": "2", "visible": true, "focused": true, "urgent": false},
+  "old": {"id": 1, "num": 1, "name": "1", "visible": false, "focused": false, "urgent": false}
+}

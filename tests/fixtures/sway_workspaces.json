@@ -1,0 +1,5 @@
+[
+  {"id": 1, "num": 1, "name": "1", "visible": true, "focused": true, "urgent": false, "output": "eDP-1"},
+  {"id": 2, "num": 2, "name": "2", "visible": false, "focused": false, "urgent": false, "output": "eDP-1"},
+  {"id": 3, "num": 3, "name": "3:web", "visible": false, "focused": false, "urgent": true, "output": "eDP-1"}
+]
