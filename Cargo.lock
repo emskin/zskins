@@ -7249,6 +7249,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "zlauncher"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "gpui",
+ "gpui_platform",
+ "rayon",
+ "tracing",
+ "tracing-subscriber",
+ "unicode-segmentation",
+]
+
+[[package]]
 name = "zlog"
 version = "0.1.0"
 source = "git+https://github.com/zed-industries/zed#45c0ced8b2ccee4229a6fb9c42a48bcdc6f83514"

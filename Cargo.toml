@@ -18,6 +18,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 async-channel = "2"
 wayland-client = "0.31"
 wayland-protocols = { version = "0.32", features = ["client", "unstable", "staging"] }
+gtk4 = "0.9"
+unicode-segmentation = "1"
+rayon = "1"
 
 [profile.release]
 lto = "thin"
