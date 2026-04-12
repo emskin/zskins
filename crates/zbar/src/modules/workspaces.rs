@@ -20,7 +20,7 @@ impl WorkspacesModule {
             };
         };
 
-        let (tx, rx) = async_channel::unbounded::<WorkspaceEvent>();
+        let (tx, rx) = async_channel::bounded::<WorkspaceEvent>(64);
 
         cx.spawn({
             let backend = backend.clone();
@@ -102,6 +102,7 @@ impl Render for WorkspacesModule {
                 let backend = backend.clone();
                 let entity = cx.entity().clone();
                 pill = pill.on_mouse_down(MouseButton::Left, move |_e: &MouseDownEvent, _w, cx| {
+                    tracing::debug!("workspace click: {}", id.0);
                     entity.update(cx, |m, cx| {
                         m.activate_optimistic(&id);
                         cx.notify();

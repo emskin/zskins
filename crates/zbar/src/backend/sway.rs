@@ -113,8 +113,10 @@ impl WorkspaceBackend for SwayBackend {
             let mut delay_ms: u64 = 1000;
             loop {
                 match run_session(&sink) {
-                    Ok(()) => log::info!("sway session ended cleanly"),
-                    Err(e) => log::warn!("sway session error: {e:#}; reconnecting in {delay_ms}ms"),
+                    Ok(()) => tracing::info!("sway session ended cleanly"),
+                    Err(e) => {
+                        tracing::warn!("sway session error: {e:#}; reconnecting in {delay_ms}ms")
+                    }
                 }
                 let _ = sink.send_blocking(WorkspaceEvent::Disconnected);
                 std::thread::sleep(std::time::Duration::from_millis(delay_ms));
@@ -129,10 +131,12 @@ impl WorkspaceBackend for SwayBackend {
             let result = (|| -> anyhow::Result<()> {
                 let mut conn = SwayConn::connect()?;
                 conn.send(MSG_RUN_COMMAND, cmd.as_bytes())?;
+                let (_msg_type, payload) = conn.read_message()?;
+                tracing::debug!(cmd = %cmd, payload = ?payload, "activate response");
                 Ok(())
             })();
             if let Err(e) = result {
-                log::warn!("activate failed: {e:#}");
+                tracing::warn!("activate failed: {e:#}");
             }
         });
     }

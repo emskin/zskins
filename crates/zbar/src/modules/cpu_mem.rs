@@ -16,7 +16,7 @@ impl CpuMemModule {
         let (idle, total) = read_cpu_times();
 
         cx.spawn(async move |this, cx| loop {
-            cx.background_executor().timer(Duration::from_secs(2)).await;
+            cx.background_executor().timer(Duration::from_secs(3)).await;
             let (idle, total) = read_cpu_times();
             let mem = read_mem_percent();
             if this
@@ -30,13 +30,12 @@ impl CpuMemModule {
                     };
                     m.prev_idle = idle;
                     m.prev_total = total;
-                    if (m.cpu_percent - cpu).abs() >= 0.5 || (m.mem_percent - mem).abs() >= 0.5 {
-                        m.cpu_percent = cpu;
-                        m.mem_percent = mem;
+                    let changed =
+                        (m.cpu_percent - cpu).abs() >= 0.5 || (m.mem_percent - mem).abs() >= 0.5;
+                    m.cpu_percent = cpu;
+                    m.mem_percent = mem;
+                    if changed {
                         cx.notify();
-                    } else {
-                        m.cpu_percent = cpu;
-                        m.mem_percent = mem;
                     }
                 })
                 .is_err()

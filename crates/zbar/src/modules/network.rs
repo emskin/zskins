@@ -18,7 +18,9 @@ enum NetState {
 impl NetworkModule {
     pub fn new(cx: &mut Context<Self>) -> Self {
         cx.spawn(async move |this, cx| loop {
-            cx.background_executor().timer(Duration::from_secs(5)).await;
+            cx.background_executor()
+                .timer(Duration::from_secs(10))
+                .await;
             let state = read_network();
             if this
                 .update(cx, |m, cx| {

@@ -12,7 +12,7 @@ impl WindowTitleModule {
             return WindowTitleModule { title: None };
         }
 
-        let (tx, rx) = async_channel::unbounded::<Option<String>>();
+        let (tx, rx) = async_channel::bounded::<Option<String>>(16);
 
         cx.background_executor()
             .spawn(async move {
@@ -20,7 +20,7 @@ impl WindowTitleModule {
                 loop {
                     match run_window_title_session(tx.clone()) {
                         Ok(()) => {}
-                        Err(e) => log::warn!(
+                        Err(e) => tracing::warn!(
                             "window-title session error: {e:#}; reconnecting in {delay_ms}ms"
                         ),
                     }

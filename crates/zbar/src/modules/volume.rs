@@ -1,7 +1,8 @@
 use crate::theme;
 use gpui::{div, Context, IntoElement, ParentElement, Render, Styled, Window};
-use std::process::Command;
-use std::time::Duration;
+use std::io::BufRead;
+use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 
 pub struct VolumeModule {
     percent: Option<u32>,
@@ -11,32 +12,87 @@ pub struct VolumeModule {
 impl VolumeModule {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let (percent, muted) = read_volume();
+        let (tx, rx) = async_channel::bounded::<(Option<u32>, bool)>(4);
 
-        cx.spawn(async move |this, cx| loop {
-            cx.background_executor().timer(Duration::from_secs(2)).await;
-            let (percent, muted) = read_volume();
-            if this
-                .update(cx, |m, cx| {
-                    if m.percent != percent || m.muted != muted {
-                        m.percent = percent;
-                        m.muted = muted;
-                        cx.notify();
-                    }
-                })
-                .is_err()
-            {
-                break;
+        cx.spawn(async move |this, cx| {
+            while let Ok((percent, muted)) = rx.recv().await {
+                if this
+                    .update(cx, |m, cx| {
+                        if m.percent != percent || m.muted != muted {
+                            m.percent = percent;
+                            m.muted = muted;
+                            cx.notify();
+                        }
+                    })
+                    .is_err()
+                {
+                    break;
+                }
             }
         })
         .detach();
+
+        std::thread::Builder::new()
+            .name("volume-pactl-subscribe".into())
+            .spawn(move || run_pactl_subscribe(tx))
+            .expect("spawn volume thread");
 
         VolumeModule { percent, muted }
     }
 }
 
+fn run_pactl_subscribe(tx: async_channel::Sender<(Option<u32>, bool)>) {
+    let mut delay_ms: u64 = 1000;
+    loop {
+        let result = run_pactl_session(&tx);
+        match result {
+            Ok(()) => return,
+            Err(e) => {
+                tracing::warn!("pactl subscribe failed: {e:#}; reconnecting in {delay_ms}ms");
+                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                delay_ms = (delay_ms * 2).min(30_000);
+            }
+        }
+    }
+}
+
+fn run_pactl_session(tx: &async_channel::Sender<(Option<u32>, bool)>) -> anyhow::Result<()> {
+    let mut child = Command::new("pactl")
+        .arg("subscribe")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()?;
+
+    let stdout = child.stdout.take().expect("stdout is piped");
+    let reader = std::io::BufReader::new(stdout);
+
+    for line in reader.lines() {
+        let line = line?;
+        if line.contains(" on sink #") {
+            if tx.is_closed() {
+                let _ = child.kill();
+                return Ok(());
+            }
+            let _ = tx.try_send(read_volume());
+        }
+    }
+    anyhow::bail!("pactl subscribe exited")
+}
+
+static HAS_WPCTL: OnceLock<bool> = OnceLock::new();
+
 fn read_volume() -> (Option<u32>, bool) {
-    if let Some(result) = read_wpctl() {
-        return result;
+    let use_wpctl = *HAS_WPCTL.get_or_init(|| {
+        Command::new("wpctl")
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    });
+    if use_wpctl {
+        if let Some(result) = read_wpctl() {
+            return result;
+        }
     }
     read_pactl().unwrap_or((None, false))
 }

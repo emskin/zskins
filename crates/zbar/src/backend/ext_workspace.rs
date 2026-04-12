@@ -91,7 +91,7 @@ impl Dispatch<ExtWorkspaceManagerV1, ()> for AppState {
             }
             ext_workspace_manager_v1::Event::WorkspaceGroup { .. } => {}
             ext_workspace_manager_v1::Event::Finished => {
-                log::info!("ext-workspace manager finished");
+                tracing::info!("ext-workspace manager finished");
             }
             _ => {}
         }
@@ -200,8 +200,8 @@ impl WorkspaceBackend for ExtWorkspaceBackend {
             let mut delay_ms: u64 = 1000;
             loop {
                 match run_session(sink.clone(), activate_request.clone()) {
-                    Ok(()) => log::info!("ext-workspace session ended cleanly"),
-                    Err(e) => log::warn!(
+                    Ok(()) => tracing::info!("ext-workspace session ended cleanly"),
+                    Err(e) => tracing::warn!(
                         "ext-workspace session error: {e:#}; reconnecting in {delay_ms}ms"
                     ),
                 }
@@ -247,7 +247,7 @@ fn run_session(
                 manager.commit();
                 conn.flush()?;
             } else {
-                log::warn!("activate: workspace '{}' not found", req.0);
+                tracing::warn!("activate: workspace '{}' not found", req.0);
             }
         }
     }

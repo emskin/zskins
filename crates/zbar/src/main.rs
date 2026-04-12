@@ -10,7 +10,12 @@ use zbar::theme::BAR_HEIGHT;
 use crate::bar::Bar;
 
 fn main() {
-    env_logger::init();
+    // Must be set before any threads spawn.
+    std::env::set_var("XKB_COMPOSE_DISABLE", "1");
+
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
 
     let backend = zbar::backend::detect::detect_backend();
 
