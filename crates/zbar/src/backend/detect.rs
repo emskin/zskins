@@ -1,16 +1,12 @@
+use crate::backend::{ext_workspace::ExtWorkspaceBackend, sway::SwayBackend, WorkspaceBackend};
 use std::sync::Arc;
-use crate::backend::{
-    WorkspaceBackend,
-    sway::SwayBackend,
-    ext_workspace::ExtWorkspaceBackend,
-};
 
 pub fn detect_backend() -> Option<Arc<dyn WorkspaceBackend>> {
     // 1. SWAYSOCK present?
     if let Ok(path) = std::env::var("SWAYSOCK") {
         if std::path::Path::new(&path).exists() {
             log::info!("detected sway backend (SWAYSOCK={path})");
-            return Some(Arc::new(SwayBackend::new()));
+            return Some(Arc::new(SwayBackend));
         }
     }
 

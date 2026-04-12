@@ -1,0 +1,18 @@
+[package]
+name = "zbar"
+version.workspace = true
+edition.workspace = true
+description = "Wayland status bar built on GPUI"
+
+[dependencies]
+gpui.workspace = true
+gpui_platform.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+chrono.workspace = true
+log.workspace = true
+env_logger.workspace = true
+async-channel.workspace = true
+wayland-client.workspace = true
+wayland-protocols.workspace = true

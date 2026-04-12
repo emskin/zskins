@@ -151,11 +151,17 @@ pub struct ExtWorkspaceBackend {
     activate_request: Arc<Mutex<Option<WorkspaceId>>>,
 }
 
-impl ExtWorkspaceBackend {
-    pub fn new() -> Self {
+impl Default for ExtWorkspaceBackend {
+    fn default() -> Self {
         ExtWorkspaceBackend {
             activate_request: Arc::new(Mutex::new(None)),
         }
+    }
+}
+
+impl ExtWorkspaceBackend {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Check whether the running compositor advertises ext_workspace_manager_v1.
@@ -195,7 +201,9 @@ impl WorkspaceBackend for ExtWorkspaceBackend {
             loop {
                 match run_session(sink.clone(), activate_request.clone()) {
                     Ok(()) => log::info!("ext-workspace session ended cleanly"),
-                    Err(e) => log::warn!("ext-workspace session error: {e:#}; reconnecting in {delay_ms}ms"),
+                    Err(e) => log::warn!(
+                        "ext-workspace session error: {e:#}; reconnecting in {delay_ms}ms"
+                    ),
                 }
                 let _ = sink.send_blocking(WorkspaceEvent::Disconnected);
                 std::thread::sleep(std::time::Duration::from_millis(delay_ms));

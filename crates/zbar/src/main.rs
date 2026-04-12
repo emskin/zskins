@@ -1,8 +1,8 @@
 mod bar;
 
 use gpui::{
-    App, AppContext, Bounds, Size, WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions,
-    layer_shell::*, point, px,
+    layer_shell::*, point, px, App, AppContext, Bounds, Size, WindowBackgroundAppearance,
+    WindowBounds, WindowKind, WindowOptions,
 };
 use gpui_platform::application;
 use zbar::theme::BAR_HEIGHT;
@@ -24,7 +24,7 @@ fn main() {
                     size: Size::new(px(1920.), BAR_HEIGHT),
                 })),
                 app_id: Some("zbar".to_string()),
-                window_background: WindowBackgroundAppearance::Opaque,
+                window_background: WindowBackgroundAppearance::Transparent,
                 kind: WindowKind::LayerShell(LayerShellOptions {
                     namespace: "zbar".to_string(),
                     layer: Layer::Top,

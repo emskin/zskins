@@ -1,8 +1,8 @@
 use gpui::{AsyncApp, Task};
 
 pub mod detect;
-pub mod sway;
 pub mod ext_workspace;
+pub mod sway;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct WorkspaceId(pub String);
@@ -23,9 +23,8 @@ pub struct WorkspaceState {
 
 #[derive(Debug, Clone)]
 pub enum WorkspaceEvent {
-    /// Full state replacement (initial snapshot or after any update).
     Snapshot(WorkspaceState),
-    /// Backend disconnected; module should clear UI and wait for reconnect.
+    Focus(WorkspaceId),
     Disconnected,
 }
 

@@ -1,10 +1,11 @@
-use std::io::{Read, Write};
-use std::os::unix::net::UnixStream;
-use std::sync::{Arc, Mutex};
-use serde::Deserialize;
+use crate::backend::{
+    EventSink, Workspace, WorkspaceBackend, WorkspaceEvent, WorkspaceId, WorkspaceState,
+};
 use anyhow::Result;
 use gpui::{AsyncApp, Task};
-use crate::backend::{EventSink, Workspace, WorkspaceBackend, WorkspaceEvent, WorkspaceId, WorkspaceState};
+use serde::Deserialize;
+use std::io::{Read, Write};
+use std::os::unix::net::UnixStream;
 
 #[derive(Deserialize)]
 struct RawWorkspace {
@@ -16,21 +17,22 @@ struct RawWorkspace {
 pub fn parse_get_workspaces(raw: &str) -> Result<WorkspaceState> {
     let raws: Vec<RawWorkspace> = serde_json::from_str(raw)?;
     let mut active = None;
-    let workspaces: Vec<Workspace> = raws.into_iter().map(|r| {
-        let id = WorkspaceId(r.name.clone());
-        if r.focused { active = Some(id.clone()); }
-        Workspace {
-            id,
-            name: r.name,
-            active: r.focused,
-            urgent: r.urgent,
-        }
-    }).collect();
+    let workspaces: Vec<Workspace> = raws
+        .into_iter()
+        .map(|r| {
+            let id = WorkspaceId(r.name.clone());
+            if r.focused {
+                active = Some(id.clone());
+            }
+            Workspace {
+                id,
+                name: r.name,
+                active: r.focused,
+                urgent: r.urgent,
+            }
+        })
+        .collect();
     Ok(WorkspaceState { workspaces, active })
-}
-
-pub struct WorkspaceChange {
-    pub new_active: Option<WorkspaceId>,
 }
 
 #[derive(Deserialize)]
@@ -39,14 +41,23 @@ struct RawEvent {
     current: Option<RawWorkspace>,
 }
 
-pub fn parse_workspace_event(raw: &str) -> Result<WorkspaceChange> {
+enum EventAction {
+    Focus(WorkspaceId),
+    Refetch,
+    Ignore,
+}
+
+fn classify_event(raw: &str) -> Result<EventAction> {
     let ev: RawEvent = serde_json::from_str(raw)?;
-    let new_active = if ev.change == "focus" {
-        ev.current.map(|w| WorkspaceId(w.name))
-    } else {
-        None
-    };
-    Ok(WorkspaceChange { new_active })
+    match ev.change.as_str() {
+        "focus" => Ok(match ev.current {
+            Some(w) => EventAction::Focus(WorkspaceId(w.name)),
+            None => EventAction::Ignore,
+        }),
+        "init" | "empty" | "move" | "rename" | "reload" => Ok(EventAction::Refetch),
+        "urgent" => Ok(EventAction::Refetch),
+        _ => Ok(EventAction::Ignore),
+    }
 }
 
 const MAGIC: &[u8; 6] = b"i3-ipc";
@@ -86,12 +97,6 @@ impl SwayConn {
         self.stream.read_exact(&mut payload)?;
         Ok((msg_type, payload))
     }
-
-    /// Clones the underlying stream so a second handle can issue commands while
-    /// the main handle is blocked on read.
-    pub fn try_clone(&self) -> anyhow::Result<SwayConn> {
-        Ok(SwayConn { stream: self.stream.try_clone()? })
-    }
 }
 
 const MSG_RUN_COMMAND: u32 = 0;
@@ -99,28 +104,18 @@ const MSG_GET_WORKSPACES: u32 = 1;
 const MSG_SUBSCRIBE: u32 = 2;
 const EVENT_WORKSPACE: u32 = 0x80000000;
 
-pub struct SwayBackend {
-    /// Cloned write-side stream used by `activate` from any thread.
-    cmd_conn: Arc<Mutex<Option<SwayConn>>>,
-}
-
-impl SwayBackend {
-    pub fn new() -> Self {
-        SwayBackend { cmd_conn: Arc::new(Mutex::new(None)) }
-    }
-}
+#[derive(Default)]
+pub struct SwayBackend;
 
 impl WorkspaceBackend for SwayBackend {
     fn run(&self, sink: EventSink, cx: &mut AsyncApp) -> Task<()> {
-        let cmd_conn = self.cmd_conn.clone();
         cx.background_executor().spawn(async move {
             let mut delay_ms: u64 = 1000;
             loop {
-                match run_session(&cmd_conn, &sink) {
+                match run_session(&sink) {
                     Ok(()) => log::info!("sway session ended cleanly"),
                     Err(e) => log::warn!("sway session error: {e:#}; reconnecting in {delay_ms}ms"),
                 }
-                *cmd_conn.lock().unwrap() = None;
                 let _ = sink.send_blocking(WorkspaceEvent::Disconnected);
                 std::thread::sleep(std::time::Duration::from_millis(delay_ms));
                 delay_ms = (delay_ms * 2).min(30_000);
@@ -129,14 +124,17 @@ impl WorkspaceBackend for SwayBackend {
     }
 
     fn activate(&self, id: &WorkspaceId) {
-        let mut guard = self.cmd_conn.lock().unwrap();
-        let Some(conn) = guard.as_mut() else { return };
         let cmd = format!("workspace {}", id.0);
-        if let Err(e) = conn.send(MSG_RUN_COMMAND, cmd.as_bytes()) {
-            log::warn!("activate failed: {e:#}");
-            return;
-        }
-        let _ = conn.read_message();
+        std::thread::spawn(move || {
+            let result = (|| -> anyhow::Result<()> {
+                let mut conn = SwayConn::connect()?;
+                conn.send(MSG_RUN_COMMAND, cmd.as_bytes())?;
+                Ok(())
+            })();
+            if let Err(e) = result {
+                log::warn!("activate failed: {e:#}");
+            }
+        });
     }
 }
 
@@ -157,7 +155,9 @@ struct RawContainer {
 pub fn parse_window_event(raw: &str) -> anyhow::Result<Option<String>> {
     let ev: RawWindowEvent = serde_json::from_str(raw)?;
     if ev.change == "focus" || ev.change == "title" {
-        Ok(ev.container.and_then(|c| if c.focused { c.name } else { None }))
+        Ok(ev
+            .container
+            .and_then(|c| if c.focused { c.name } else { None }))
     } else {
         Ok(None)
     }
@@ -166,7 +166,7 @@ pub fn parse_window_event(raw: &str) -> anyhow::Result<Option<String>> {
 pub fn run_window_title_session(sink: async_channel::Sender<Option<String>>) -> anyhow::Result<()> {
     let mut conn = SwayConn::connect()?;
     conn.send(MSG_SUBSCRIBE, br#"["window"]"#)?;
-    let _ = conn.read_message()?; // ack
+    let _ = conn.read_message()?;
     loop {
         let (msg_type, payload) = conn.read_message()?;
         if msg_type == EVENT_WINDOW {
@@ -177,35 +177,36 @@ pub fn run_window_title_session(sink: async_channel::Sender<Option<String>>) -> 
     }
 }
 
-fn run_session(
-    cmd_conn: &Arc<Mutex<Option<SwayConn>>>,
-    sink: &EventSink,
-) -> anyhow::Result<()> {
-    let mut conn = SwayConn::connect()?;
-    let cmd = conn.try_clone()?;
-    *cmd_conn.lock().unwrap() = Some(cmd);
+fn fetch_workspaces(cmd: &mut SwayConn) -> anyhow::Result<WorkspaceState> {
+    cmd.send(MSG_GET_WORKSPACES, b"")?;
+    let (_t, payload) = cmd.read_message()?;
+    parse_get_workspaces(std::str::from_utf8(&payload)?)
+}
 
-    // 1. Subscribe
-    conn.send(MSG_SUBSCRIBE, br#"["workspace"]"#)?;
-    let (_t, _payload) = conn.read_message()?; // subscription ack
+fn run_session(sink: &EventSink) -> anyhow::Result<()> {
+    let mut sub = SwayConn::connect()?;
+    let mut cmd = SwayConn::connect()?;
 
-    // 2. Initial snapshot
-    conn.send(MSG_GET_WORKSPACES, b"")?;
-    let (_t, payload) = conn.read_message()?;
-    let state = parse_get_workspaces(std::str::from_utf8(&payload)?)?;
+    sub.send(MSG_SUBSCRIBE, br#"["workspace"]"#)?;
+    let _ = sub.read_message()?;
+
+    let state = fetch_workspaces(&mut cmd)?;
     sink.send_blocking(WorkspaceEvent::Snapshot(state))?;
 
-    // 3. Event loop — refetch snapshot on every workspace event for simplicity
     loop {
-        let (msg_type, _payload) = conn.read_message()?;
+        let (msg_type, payload) = sub.read_message()?;
         if msg_type == EVENT_WORKSPACE {
-            // Re-fetch full state instead of applying deltas. Simpler, fewer bugs.
-            // Use a fresh command connection to avoid mid-event recursion.
-            let mut snap_conn = SwayConn::connect()?;
-            snap_conn.send(MSG_GET_WORKSPACES, b"")?;
-            let (_t, payload) = snap_conn.read_message()?;
-            let state = parse_get_workspaces(std::str::from_utf8(&payload)?)?;
-            sink.send_blocking(WorkspaceEvent::Snapshot(state))?;
+            let raw = std::str::from_utf8(&payload)?;
+            match classify_event(raw)? {
+                EventAction::Focus(id) => {
+                    sink.send_blocking(WorkspaceEvent::Focus(id))?;
+                }
+                EventAction::Refetch => {
+                    let state = fetch_workspaces(&mut cmd)?;
+                    sink.send_blocking(WorkspaceEvent::Snapshot(state))?;
+                }
+                EventAction::Ignore => {}
+            }
         }
     }
 }
