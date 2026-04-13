@@ -1,0 +1,9 @@
+[package]
+name = "icon-theme"
+version.workspace = true
+edition.workspace = true
+description = "Freedesktop icon theme lookup with category-based caching"
+
+[dependencies]
+rayon.workspace = true
+tracing.workspace = true

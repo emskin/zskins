@@ -2803,6 +2803,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "icon-theme"
+version = "0.1.0"
+dependencies = [
+ "rayon",
+ "tracing",
+]
+
+[[package]]
 name = "icu_collections"
 version = "2.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7426,11 +7434,13 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-channel 2.5.0",
+ "async-executor",
  "async-io",
  "chrono",
  "futures-lite 2.6.1",
  "gpui",
  "gpui_platform",
+ "icon-theme",
  "image",
  "libc",
  "serde",
@@ -7687,6 +7697,7 @@ dependencies = [
  "clap",
  "gpui",
  "gpui_platform",
+ "icon-theme",
  "include_dir",
  "nix 0.29.0",
  "once_cell",
