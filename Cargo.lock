@@ -7480,20 +7480,10 @@ dependencies = [
  "gpui_platform",
  "nix 0.29.0",
  "rayon",
- "tracing",
- "tracing-subscriber",
- "unicode-segmentation",
- "zofi-clipd-core",
-]
-
-[[package]]
-name = "zofi-clipd"
-version = "0.1.0"
-dependencies = [
- "anyhow",
  "serde_json",
  "tracing",
  "tracing-subscriber",
+ "unicode-segmentation",
  "zofi-clipd-core",
 ]
 

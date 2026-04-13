@@ -1,10 +1,13 @@
+mod clipd;
 mod input;
 mod launcher;
 mod source;
 mod sources;
 mod theme;
 
-use clap::Parser;
+use std::path::PathBuf;
+
+use clap::{Parser, Subcommand};
 use gpui::{
     layer_shell::*, App, AppContext, Bounds, WindowBackgroundAppearance, WindowBounds, WindowKind,
     WindowOptions,
@@ -35,16 +38,33 @@ pub const SOURCES: &[SourceEntry] = &[
 #[derive(Parser)]
 #[command(name = "zofi", about = "rofi-style multi-source launcher", version)]
 struct Cli {
-    /// Source to open. Defaults to the first registered source.
+    /// Source to open when no subcommand is given.
     source: Option<String>,
+
+    #[command(subcommand)]
+    cmd: Option<Cmd>,
 }
 
-fn main() {
+#[derive(Subcommand)]
+enum Cmd {
+    /// Run the clipboard daemon.
+    Clipd,
+    /// Bulk-import a clipman.json into the clipboard db.
+    Import { path: PathBuf },
+}
+
+fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
     let cli = Cli::parse();
+    match cli.cmd {
+        Some(Cmd::Clipd) => return clipd::run(),
+        Some(Cmd::Import { path }) => return clipd::import(&path),
+        None => {}
+    }
+
     let initial_ix = match cli.source.as_deref() {
         None => 0,
         Some(name) => SOURCES
@@ -82,4 +102,5 @@ fn main() {
         )
         .expect("failed to open zofi window: check compositor supports layer-shell");
     });
+    Ok(())
 }

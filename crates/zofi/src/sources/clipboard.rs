@@ -1,5 +1,4 @@
 use std::os::unix::process::CommandExt;
-use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -285,24 +284,11 @@ fn decode_image_for_mime(entry: &Entry, mime: &str) -> Option<Arc<gpui::Image>> 
     }))
 }
 
-/// Locate the daemon binary: try a sibling of the current zofi binary first
-/// (handy when running from `target/debug/`), fall back to PATH.
-fn locate_daemon() -> PathBuf {
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(parent) = exe.parent() {
-            let sibling = parent.join("zofi-clipd");
-            if sibling.exists() {
-                return sibling;
-            }
-        }
-    }
-    PathBuf::from("zofi-clipd")
-}
-
 fn spawn_daemon() -> std::io::Result<()> {
-    let bin = locate_daemon();
+    let bin = std::env::current_exe()?;
     let mut cmd = Command::new(&bin);
-    cmd.stdin(Stdio::null())
+    cmd.arg("clipd")
+        .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     // setsid in the child so the daemon survives zofi exiting.
@@ -312,7 +298,7 @@ fn spawn_daemon() -> std::io::Result<()> {
         });
     }
     let child = cmd.spawn()?;
-    tracing::info!("spawned zofi-clipd ({}) pid={}", bin.display(), child.id());
+    tracing::info!("spawned `{} clipd` pid={}", bin.display(), child.id());
     Ok(())
 }
 
