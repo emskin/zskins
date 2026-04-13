@@ -7,6 +7,9 @@ edition.workspace = true
 gpui.workspace = true
 gpui_platform.workspace = true
 anyhow.workspace = true
+zofi-clipd-core = { path = "../zofi-clipd-core" }
+nix.workspace = true
+clap.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 unicode-segmentation.workspace = true

@@ -22,6 +22,7 @@ Wayland status bar built on GPUI (Zed's UI framework). Cargo workspace.
 - `RUST_LOG=debug` for verbose output including workspace click events
 
 ## Key Patterns
+- Errors: `thiserror` for typed errors (not `anyhow`). Define per-module error enums with `#[derive(thiserror::Error)]`.
 - Logging: `tracing` crate (not `log`). Use `tracing::info!`, `tracing::warn!`, etc.
 - Async timers: `cx.background_executor().timer(Duration).await` (not `std::thread::sleep`)
 - Event channels: `async_channel::bounded` (not unbounded) to prevent memory growth

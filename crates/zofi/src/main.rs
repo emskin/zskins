@@ -4,6 +4,7 @@ mod source;
 mod sources;
 mod theme;
 
+use clap::Parser;
 use gpui::{
     layer_shell::*, App, AppContext, Bounds, WindowBackgroundAppearance, WindowBounds, WindowKind,
     WindowOptions,
@@ -12,29 +13,50 @@ use gpui_platform::application;
 
 use crate::source::Source;
 
-const DEFAULT_SOURCE: &str = "apps";
-const KNOWN_SOURCES: &[&str] = &["apps"];
+pub struct SourceEntry {
+    pub name: &'static str,
+    pub icon: &'static str,
+    pub factory: fn() -> Box<dyn Source>,
+}
+
+pub const SOURCES: &[SourceEntry] = &[
+    SourceEntry {
+        name: "apps",
+        icon: "⊞",
+        factory: || Box::new(sources::apps::AppsSource::load()),
+    },
+    SourceEntry {
+        name: "clipboard",
+        icon: "▤",
+        factory: || Box::new(sources::clipboard::ClipboardSource::load()),
+    },
+];
+
+#[derive(Parser)]
+#[command(name = "zofi", about = "rofi-style multi-source launcher", version)]
+struct Cli {
+    /// Source to open. Defaults to the first registered source.
+    source: Option<String>,
+}
 
 fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
-    let source_name = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| DEFAULT_SOURCE.to_string());
-    if matches!(source_name.as_str(), "-h" | "--help" | "help") {
-        print_help();
-        return;
-    }
-
-    let source = match build_source(&source_name) {
-        Some(s) => s,
-        None => {
-            eprintln!("zofi: unknown source `{source_name}`");
-            print_help();
-            std::process::exit(2);
-        }
+    let cli = Cli::parse();
+    let initial_ix = match cli.source.as_deref() {
+        None => 0,
+        Some(name) => SOURCES
+            .iter()
+            .position(|s| s.name == name)
+            .unwrap_or_else(|| {
+                eprintln!(
+                    "zofi: unknown source `{name}` (available: {})",
+                    SOURCES.iter().map(|s| s.name).collect::<Vec<_>>().join(", ")
+                );
+                std::process::exit(2);
+            }),
     };
 
     application().run(move |cx: &mut App| {
@@ -56,25 +78,8 @@ fn main() {
                 }),
                 ..Default::default()
             },
-            |window, cx| cx.new(|cx| launcher::Launcher::new(source, window, cx)),
+            |window, cx| cx.new(|cx| launcher::Launcher::new(initial_ix, window, cx)),
         )
         .expect("failed to open zofi window: check compositor supports layer-shell");
     });
-}
-
-fn build_source(name: &str) -> Option<Box<dyn Source>> {
-    match name {
-        "apps" => Some(Box::new(sources::apps::AppsSource::load())),
-        _ => None,
-    }
-}
-
-fn print_help() {
-    println!("usage: zofi [SOURCE]");
-    println!();
-    println!("Sources:");
-    for s in KNOWN_SOURCES {
-        let marker = if *s == DEFAULT_SOURCE { " (default)" } else { "" };
-        println!("  {s}{marker}");
-    }
 }

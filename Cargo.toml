@@ -18,9 +18,15 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 async-channel = "2"
 wayland-client = "0.31"
 wayland-protocols = { version = "0.32", features = ["client", "unstable", "staging"] }
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+rusqlite = { version = "0.31", features = ["bundled", "blob"] }
+blake3 = "1"
+nix = { version = "0.29", features = ["fs", "signal", "process", "poll"] }
 gtk4 = "0.9"
 unicode-segmentation = "1"
 rayon = "1"
+clap = { version = "4", features = ["derive"] }
+uuid = { version = "1", features = ["v4"] }
 
 [profile.release]
 lto = "thin"

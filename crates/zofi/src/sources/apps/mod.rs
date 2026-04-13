@@ -24,6 +24,14 @@ impl AppsSource {
 }
 
 impl Source for AppsSource {
+    fn name(&self) -> &'static str {
+        "apps"
+    }
+
+    fn icon(&self) -> &'static str {
+        "⊞"
+    }
+
     fn placeholder(&self) -> &'static str {
         "Search applications..."
     }
@@ -58,7 +66,10 @@ impl Source for AppsSource {
             .child(
                 div()
                     .flex_1()
-                    .overflow_x_hidden()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
                     .text_size(theme::FONT_SIZE)
                     .font_weight(if selected {
                         FontWeight::MEDIUM

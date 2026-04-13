@@ -1,0 +1,16 @@
+[package]
+name = "zofi-clipd-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+wayland-client.workspace = true
+wayland-protocols-wlr.workspace = true
+rusqlite.workspace = true
+blake3.workspace = true
+nix.workspace = true
+uuid.workspace = true

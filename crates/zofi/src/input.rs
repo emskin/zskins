@@ -104,6 +104,19 @@ impl TextInput {
         self.on_change = Some(callback);
     }
 
+    pub fn set_placeholder(&mut self, placeholder: impl Into<SharedString>) {
+        self.placeholder = placeholder.into();
+    }
+
+    /// Programmatic content reset (e.g. switching sources). Does not fire the
+    /// on_change callback — that would re-enter whoever owns this input.
+    pub fn set_text(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.content = text.into();
+        self.selected_range = 0..0;
+        self.marked_range = None;
+        cx.notify();
+    }
+
     fn emit_change(&self, cx: &mut App) {
         if let Some(ref cb) = self.on_change {
             cb(&self.content, cx);

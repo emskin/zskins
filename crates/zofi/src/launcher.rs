@@ -1,13 +1,20 @@
 use gpui::{
-    actions, div, prelude::*, px, uniform_list, App, Context, Entity, FocusHandle, Focusable,
-    FontWeight, KeyBinding, MouseButton, ScrollStrategy, UniformListScrollHandle, Window,
+    actions, div, img, prelude::*, px, uniform_list, AnyElement, App, Context, Entity,
+    FocusHandle, Focusable, FontWeight, KeyBinding, MouseButton, ObjectFit, ScrollStrategy,
+    UniformListScrollHandle, Window,
 };
 
 use crate::input::TextInput;
-use crate::source::Source;
+use crate::source::{Layout, Preview, Source};
 use crate::theme;
+use crate::SOURCES;
 
-actions!(zofi, [MoveUp, MoveDown, Confirm, Dismiss]);
+const PREVIEW_TEXT_MAX_LINES: usize = 200;
+
+actions!(
+    zofi,
+    [MoveUp, MoveDown, Confirm, Dismiss, NextSource, PrevSource, ToggleMimePane]
+);
 
 pub fn key_bindings() -> Vec<KeyBinding> {
     let mut bindings = vec![
@@ -16,25 +23,51 @@ pub fn key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("ctrl-p", MoveUp, Some("Launcher")),
         KeyBinding::new("ctrl-n", MoveDown, Some("Launcher")),
         KeyBinding::new("enter", Confirm, Some("Launcher")),
+        KeyBinding::new("tab", ToggleMimePane, Some("Launcher")),
+        KeyBinding::new("ctrl-tab", NextSource, Some("Launcher")),
+        KeyBinding::new("ctrl-shift-tab", PrevSource, Some("Launcher")),
         KeyBinding::new("escape", Dismiss, None),
     ];
     bindings.extend(crate::input::input_key_bindings());
     bindings
 }
 
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum LeftPane {
+    Items,
+    Mimes,
+}
+
 pub struct Launcher {
-    source: Box<dyn Source>,
+    sources: Vec<Option<Box<dyn Source>>>,
+    active: usize,
     filtered: Vec<usize>,
     selected: usize,
+    /// Toggled by Tab — only meaningful when the selected item has ≥2 mimes.
+    left_pane: LeftPane,
+    /// Index into `mime_cache` while in `Mimes` mode.
+    mime_selected: usize,
+    /// Captured at toggle time so per-frame render avoids cloning Vec<String>
+    /// out of the source on every list row. Empty in `Items` mode.
+    mime_cache: Vec<String>,
+    /// Index of `Source::primary_mime` within `mime_cache`, or `usize::MAX`.
+    primary_mime_ix: usize,
     text_input: Entity<TextInput>,
     focus_handle: FocusHandle,
     scroll_handle: UniformListScrollHandle,
+    mime_scroll_handle: UniformListScrollHandle,
 }
 
 impl Launcher {
-    pub fn new(source: Box<dyn Source>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let filtered = source.filter("");
-        let text_input = cx.new(|cx| TextInput::new(source.placeholder(), cx));
+    pub fn new(initial: usize, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let mut sources: Vec<Option<Box<dyn Source>>> = (0..SOURCES.len()).map(|_| None).collect();
+        sources[initial] = Some((SOURCES[initial].factory)());
+        let active = initial;
+
+        let active_source = sources[active].as_ref().unwrap();
+        let filtered = active_source.filter("");
+        let placeholder = active_source.placeholder();
+        let text_input = cx.new(|cx| TextInput::new(placeholder, cx));
 
         let launcher_entity = cx.entity().downgrade();
         text_input.update(cx, |input, _cx| {
@@ -51,65 +84,190 @@ impl Launcher {
         window.focus(&text_input.focus_handle(cx), cx);
 
         Self {
-            source,
+            sources,
+            active,
             filtered,
             selected: 0,
+            left_pane: LeftPane::Items,
+            mime_selected: 0,
+            mime_cache: Vec::new(),
+            primary_mime_ix: usize::MAX,
             text_input,
             focus_handle: cx.focus_handle(),
             scroll_handle: UniformListScrollHandle::new(),
+            mime_scroll_handle: UniformListScrollHandle::new(),
         }
     }
 
-    fn update_filter(&mut self, query: &str) {
-        self.filtered = self.source.filter(query);
+    fn refresh_mime_cache(&mut self) {
+        let item_ix = match self.filtered.get(self.selected) {
+            Some(&i) => i,
+            None => {
+                self.mime_cache.clear();
+                self.primary_mime_ix = usize::MAX;
+                return;
+            }
+        };
+        self.mime_cache = self.source().mimes(item_ix);
+        self.primary_mime_ix = self
+            .source()
+            .primary_mime_index(item_ix)
+            .unwrap_or(usize::MAX);
+    }
+
+    fn source(&self) -> &dyn Source {
+        self.sources[self.active].as_deref().unwrap()
+    }
+
+    fn switch_source(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if ix >= SOURCES.len() || ix == self.active {
+            return;
+        }
+        if self.sources[ix].is_none() {
+            self.sources[ix] = Some((SOURCES[ix].factory)());
+        }
+        self.active = ix;
+        self.filtered = self.sources[ix].as_ref().unwrap().filter("");
         self.selected = 0;
+        self.left_pane = LeftPane::Items;
+        self.mime_selected = 0;
+        self.mime_cache.clear();
+        self.scroll_handle.scroll_to_item(0, ScrollStrategy::Top);
+
+        let placeholder = self.sources[ix].as_ref().unwrap().placeholder();
+        self.text_input.update(cx, |input, cx| {
+            input.set_placeholder(placeholder);
+            input.set_text("", cx);
+        });
+        window.focus(&self.text_input.focus_handle(cx), cx);
+        cx.notify();
+    }
+
+    fn update_filter(&mut self, query: &str) {
+        self.filtered = self.source().filter(query);
+        self.selected = 0;
+        self.left_pane = LeftPane::Items;
+        self.mime_selected = 0;
+        self.mime_cache.clear();
         self.scroll_handle.scroll_to_item(0, ScrollStrategy::Top);
     }
 
     fn move_up(&mut self, _: &MoveUp, _: &mut Window, cx: &mut Context<Self>) {
-        self.selected = self.selected.saturating_sub(1);
-        self.scroll_handle
-            .scroll_to_item(self.selected, ScrollStrategy::Nearest);
+        match self.left_pane {
+            LeftPane::Items => {
+                self.selected = self.selected.saturating_sub(1);
+                self.mime_selected = 0;
+                self.scroll_handle
+                    .scroll_to_item(self.selected, ScrollStrategy::Nearest);
+            }
+            LeftPane::Mimes => {
+                self.mime_selected = self.mime_selected.saturating_sub(1);
+                self.mime_scroll_handle
+                    .scroll_to_item(self.mime_selected, ScrollStrategy::Nearest);
+            }
+        }
         cx.notify();
     }
 
     fn move_down(&mut self, _: &MoveDown, _: &mut Window, cx: &mut Context<Self>) {
-        if !self.filtered.is_empty() {
-            self.selected = (self.selected + 1).min(self.filtered.len() - 1);
+        match self.left_pane {
+            LeftPane::Items => {
+                if !self.filtered.is_empty() {
+                    self.selected = (self.selected + 1).min(self.filtered.len() - 1);
+                }
+                self.mime_selected = 0;
+                self.scroll_handle
+                    .scroll_to_item(self.selected, ScrollStrategy::Nearest);
+            }
+            LeftPane::Mimes => {
+                let len = self.mime_cache.len();
+                if len > 0 {
+                    self.mime_selected = (self.mime_selected + 1).min(len - 1);
+                }
+                self.mime_scroll_handle
+                    .scroll_to_item(self.mime_selected, ScrollStrategy::Nearest);
+            }
         }
-        self.scroll_handle
-            .scroll_to_item(self.selected, ScrollStrategy::Nearest);
         cx.notify();
     }
 
     fn confirm(&mut self, _: &Confirm, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(&idx) = self.filtered.get(self.selected) {
-            self.source.activate(idx);
+            match self.left_pane {
+                LeftPane::Items => self.source().activate(idx),
+                LeftPane::Mimes => match self.mime_cache.get(self.mime_selected) {
+                    Some(mime) => self.source().activate_with_mime(idx, mime),
+                    None => self.source().activate(idx),
+                },
+            }
         }
         cx.quit();
     }
 
     fn dismiss(&mut self, _: &Dismiss, _: &mut Window, cx: &mut Context<Self>) {
-        cx.quit();
+        if self.left_pane == LeftPane::Mimes {
+            self.left_pane = LeftPane::Items;
+            cx.notify();
+        } else {
+            cx.quit();
+        }
+    }
+
+    fn toggle_mime_pane(
+        &mut self,
+        _: &ToggleMimePane,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match self.left_pane {
+            LeftPane::Items => {
+                self.refresh_mime_cache();
+                if self.mime_cache.len() < 2 {
+                    self.mime_cache.clear();
+                    return;
+                }
+                self.left_pane = LeftPane::Mimes;
+                self.mime_selected = 0;
+                self.mime_scroll_handle
+                    .scroll_to_item(0, ScrollStrategy::Top);
+            }
+            LeftPane::Mimes => {
+                self.left_pane = LeftPane::Items;
+                self.mime_cache.clear();
+            }
+        }
+        cx.notify();
+    }
+
+    fn next_source(&mut self, _: &NextSource, window: &mut Window, cx: &mut Context<Self>) {
+        let next = (self.active + 1) % SOURCES.len();
+        self.switch_source(next, window, cx);
+    }
+
+    fn prev_source(&mut self, _: &PrevSource, window: &mut Window, cx: &mut Context<Self>) {
+        let prev = (self.active + SOURCES.len() - 1) % SOURCES.len();
+        self.switch_source(prev, window, cx);
     }
 
     fn render_row(&self, list_ix: usize) -> gpui::Stateful<gpui::Div> {
         let entry_ix = self.filtered[list_ix];
         let sel = list_ix == self.selected;
-        let content = self.source.render_item(entry_ix, sel);
+        let content = self.source().render_item(entry_ix, sel);
 
-        let mut row = div().h(theme::ITEM_HEIGHT);
+        let mut row = div().h(theme::ITEM_HEIGHT).py(px(2.0));
         if sel {
             row = row.child(
                 div()
                     .size_full()
-                    .mx(px(4.0))
+                    .mx(px(6.0))
                     .rounded(theme::ITEM_RADIUS)
                     .bg(theme::selected_bg())
                     .child(content),
             );
         } else {
-            row = row.hover(|s| s.bg(theme::hover_bg())).child(content);
+            row = row
+                .child(div().size_full().mx(px(6.0)).rounded(theme::ITEM_RADIUS).child(content))
+                .hover(|s| s.bg(theme::hover_bg()));
         }
 
         row.id(list_ix)
@@ -117,6 +275,163 @@ impl Launcher {
             .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                 cx.dispatch_action(&Confirm);
             })
+    }
+
+    fn render_mime_row(
+        &self,
+        list_ix: usize,
+        mime: &str,
+        primary: bool,
+    ) -> gpui::Stateful<gpui::Div> {
+        let sel = list_ix == self.mime_selected;
+        let label = if primary {
+            format!("● {mime}")
+        } else {
+            format!("  {mime}")
+        };
+
+        let content = div()
+            .h_full()
+            .px(theme::PAD_X)
+            .flex()
+            .items_center()
+            .text_size(theme::FONT_SIZE)
+            .text_color(if sel {
+                theme::fg_accent()
+            } else {
+                theme::fg()
+            })
+            .child(label);
+
+        let mut row = div().h(theme::ITEM_HEIGHT).py(px(2.0));
+        if sel {
+            row = row.child(
+                div()
+                    .size_full()
+                    .mx(px(6.0))
+                    .rounded(theme::ITEM_RADIUS)
+                    .bg(theme::selected_bg())
+                    .child(content),
+            );
+        } else {
+            row = row
+                .child(
+                    div()
+                        .size_full()
+                        .mx(px(6.0))
+                        .rounded(theme::ITEM_RADIUS)
+                        .child(content),
+                )
+                .hover(|s| s.bg(theme::hover_bg()));
+        }
+        row.id(("mime", list_ix))
+            .cursor_pointer()
+            .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                cx.dispatch_action(&Confirm);
+            })
+    }
+
+    fn render_preview_pane(&self) -> AnyElement {
+        let item_ix = match self.filtered.get(self.selected) {
+            Some(&i) => i,
+            None => {
+                return div()
+                    .size_full()
+                    .bg(theme::preview_bg())
+                    .into_any_element()
+            }
+        };
+        let preview = match self.left_pane {
+            LeftPane::Items => self.source().preview(item_ix),
+            LeftPane::Mimes => match self.mime_cache.get(self.mime_selected) {
+                Some(m) => self.source().preview_for_mime(item_ix, m),
+                None => self.source().preview(item_ix),
+            },
+        };
+
+        let pane = div()
+            .size_full()
+            .bg(theme::preview_bg())
+            .px(px(20.0))
+            .py(px(16.0))
+            .overflow_hidden();
+        match preview {
+            Some(Preview::Text(s)) => {
+                // Soft-wrap long lines and let the pane scroll vertically when
+                // the content overflows. We collect lines into a single string
+                // (capped) so wrapping happens within each source line.
+                let body: String = s
+                    .lines()
+                    .take(PREVIEW_TEXT_MAX_LINES)
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                pane.id("preview-text")
+                    .overflow_y_scroll()
+                    .text_size(theme::PREVIEW_FONT_SIZE)
+                    .line_height(px(22.0))
+                    .text_color(theme::fg())
+                    .child(body)
+                    .into_any_element()
+            }
+            Some(Preview::Image(image)) => pane
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    img(image)
+                        .max_w_full()
+                        .max_h_full()
+                        .object_fit(ObjectFit::Contain)
+                        .rounded(px(4.0)),
+                )
+                .into_any_element(),
+            None => pane
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_color(theme::fg_dim())
+                .text_size(theme::FONT_SIZE_SM)
+                .child("(no preview)")
+                .into_any_element(),
+        }
+    }
+
+    fn render_source_bar(&self, cx: &mut Context<Self>) -> gpui::Div {
+        let mut bar = div()
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .pl(theme::PAD_X);
+        for (ix, entry) in SOURCES.iter().enumerate() {
+            let sel = ix == self.active;
+            let id = ("source-tab", ix);
+            let icon = entry.icon;
+            let bg = if sel {
+                theme::selected_bg()
+            } else {
+                gpui::transparent_black()
+            };
+            let fg = if sel { theme::fg_accent() } else { theme::fg_dim() };
+            let entity = cx.entity().downgrade();
+            let tab = div()
+                .id(id)
+                .cursor_pointer()
+                .px(px(8.0))
+                .py(px(2.0))
+                .rounded(px(4.0))
+                .bg(bg)
+                .text_size(px(15.0))
+                .text_color(fg)
+                .hover(|s| s.bg(theme::hover_bg()))
+                .child(icon)
+                .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                    if let Some(this) = entity.upgrade() {
+                        this.update(cx, |this, cx| this.switch_source(ix, window, cx));
+                    }
+                });
+            bar = bar.child(tab);
+        }
+        bar
     }
 }
 
@@ -128,7 +443,103 @@ impl Render for Launcher {
         } else {
             "0/0".to_string()
         };
-        let empty_text = self.source.empty_text();
+        let empty_text = self.source().empty_text();
+
+        let list_pane = match self.left_pane {
+            LeftPane::Items if count > 0 => div()
+                .size_full()
+                .child(
+                    uniform_list(
+                        "row-list",
+                        count,
+                        cx.processor(|this, range: std::ops::Range<usize>, _w, _cx| {
+                            range
+                                .map(|ix| this.render_row(ix))
+                                .collect::<Vec<_>>()
+                        }),
+                    )
+                    .track_scroll(&self.scroll_handle)
+                    .size_full(),
+                )
+                .into_any_element(),
+            LeftPane::Items => div()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_color(theme::fg_dim())
+                .text_size(theme::FONT_SIZE)
+                .child(empty_text)
+                .into_any_element(),
+            LeftPane::Mimes => div()
+                .size_full()
+                .child(
+                    uniform_list(
+                        "mime-list",
+                        self.mime_cache.len(),
+                        cx.processor(|this, range: std::ops::Range<usize>, _w, _cx| {
+                            range
+                                .map(|ix| {
+                                    let mime = this
+                                        .mime_cache
+                                        .get(ix)
+                                        .map(String::as_str)
+                                        .unwrap_or("");
+                                    this.render_mime_row(
+                                        ix,
+                                        mime,
+                                        ix == this.primary_mime_ix,
+                                    )
+                                })
+                                .collect::<Vec<_>>()
+                        }),
+                    )
+                    .track_scroll(&self.mime_scroll_handle)
+                    .size_full(),
+                )
+                .into_any_element(),
+        };
+
+        let layout = self.source().layout();
+        let (panel_w, panel_h) = match layout {
+            Layout::List => (theme::PANEL_W, theme::PANEL_H),
+            Layout::ListAndPreview => (
+                theme::SPLIT_LIST_W + theme::SPLIT_PREVIEW_W,
+                theme::SPLIT_PANEL_H,
+            ),
+        };
+
+        let body: AnyElement = match layout {
+            Layout::List => div()
+                .flex_1()
+                .pt(px(4.0))
+                .overflow_hidden()
+                .child(list_pane)
+                .into_any_element(),
+            Layout::ListAndPreview => div()
+                .flex_1()
+                .flex()
+                .flex_row()
+                .overflow_hidden()
+                .child(
+                    div()
+                        .w(theme::SPLIT_LIST_W)
+                        .h_full()
+                        .pt(px(4.0))
+                        .child(list_pane),
+                )
+                .child(div().w(px(1.0)).h_full().bg(theme::bar_border()))
+                .child(
+                    div()
+                        .w(theme::SPLIT_PREVIEW_W)
+                        .h_full()
+                        .child(self.render_preview_pane()),
+                )
+                .into_any_element(),
+        };
+
+        let banner = self.source().banner();
+        let source_bar = self.render_source_bar(cx);
 
         div()
             .key_context("Launcher")
@@ -137,6 +548,9 @@ impl Render for Launcher {
             .on_action(cx.listener(Self::move_down))
             .on_action(cx.listener(Self::confirm))
             .on_action(cx.listener(Self::dismiss))
+            .on_action(cx.listener(Self::next_source))
+            .on_action(cx.listener(Self::prev_source))
+            .on_action(cx.listener(Self::toggle_mime_pane))
             .size_full()
             .flex()
             .items_center()
@@ -146,8 +560,8 @@ impl Render for Launcher {
             })
             .child(
                 div()
-                    .w(theme::PANEL_W)
-                    .h(theme::PANEL_H)
+                    .w(panel_w)
+                    .h(panel_h)
                     .flex()
                     .flex_col()
                     .bg(theme::panel_bg())
@@ -172,51 +586,35 @@ impl Render for Launcher {
                             ),
                     )
                     .child(div().h(px(1.0)).bg(theme::bar_border()))
+                    .children(banner)
+                    .child(body)
                     .child(
                         div()
-                            .flex_1()
-                            .pt(px(4.0))
-                            .overflow_hidden()
-                            .child(if count > 0 {
-                                div().size_full().child(
-                                    uniform_list(
-                                        "row-list",
-                                        count,
-                                        cx.processor(
-                                            |this, range: std::ops::Range<usize>, _w, _cx| {
-                                                range
-                                                    .map(|ix| this.render_row(ix))
-                                                    .collect::<Vec<_>>()
-                                            },
-                                        ),
-                                    )
-                                    .track_scroll(&self.scroll_handle)
-                                    .size_full(),
-                                )
-                            } else {
-                                div()
-                                    .size_full()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .text_color(theme::fg_dim())
-                                    .text_size(theme::FONT_SIZE)
-                                    .child(empty_text)
-                            }),
-                    )
-                    .child(
-                        div()
-                            .h(px(30.0))
-                            .px(theme::PAD_X)
+                            .h(px(34.0))
                             .flex()
                             .items_center()
-                            .justify_end()
+                            .justify_between()
                             .border_t_1()
                             .border_color(theme::bar_border())
                             .text_size(theme::FONT_SIZE_SM)
-                            .gap(px(16.0))
-                            .child(key_hint("Close", "esc"))
-                            .child(key_hint("Open", "enter")),
+                            .child(source_bar)
+                            .child(
+                                div()
+                                    .pr(theme::PAD_X)
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(16.0))
+                                    .child(key_hint(
+                                        match self.left_pane {
+                                            LeftPane::Items => "Mimes",
+                                            LeftPane::Mimes => "Items",
+                                        },
+                                        "tab",
+                                    ))
+                                    .child(key_hint("Source", "ctrl-tab"))
+                                    .child(key_hint("Close", "esc"))
+                                    .child(key_hint("Activate", "enter")),
+                            ),
                     ),
             )
     }
