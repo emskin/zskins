@@ -1,10 +1,29 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::model::{Entry, Kind, MimeContent};
+
+#[derive(Debug, thiserror::Error)]
+pub enum DbError {
+    #[error("create db parent dir {path}: {source}")]
+    CreateDir {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("open db {path}: {source}")]
+    Open {
+        path: PathBuf,
+        #[source]
+        source: rusqlite::Error,
+    },
+    #[error("sqlite: {0}")]
+    Sqlite(#[from] rusqlite::Error),
+}
+
+type Result<T> = std::result::Result<T, DbError>;
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS items (
@@ -47,10 +66,15 @@ impl RecordResult {
 impl Db {
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("create db parent dir {parent:?}"))?;
+            std::fs::create_dir_all(parent).map_err(|source| DbError::CreateDir {
+                path: parent.to_path_buf(),
+                source,
+            })?;
         }
-        let conn = Connection::open(path).with_context(|| format!("open db {path:?}"))?;
+        let conn = Connection::open(path).map_err(|source| DbError::Open {
+            path: path.to_path_buf(),
+            source,
+        })?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;

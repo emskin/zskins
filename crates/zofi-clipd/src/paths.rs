@@ -1,13 +1,17 @@
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+#[derive(Debug, thiserror::Error)]
+pub enum PathError {
+    #[error("neither XDG_DATA_HOME nor HOME is set")]
+    NoDataHome,
+}
 
 /// `$XDG_DATA_HOME/zofi/clipboard.db` (defaults to `~/.local/share/zofi/`).
-pub fn db_path() -> Result<PathBuf> {
+pub fn db_path() -> Result<PathBuf, PathError> {
     let base = std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
-        .context("neither XDG_DATA_HOME nor HOME is set")?;
+        .ok_or(PathError::NoDataHome)?;
     Ok(base.join("zofi").join("clipboard.db"))
 }
 

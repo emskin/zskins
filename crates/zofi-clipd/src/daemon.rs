@@ -10,7 +10,6 @@ use std::io::{BufRead, BufReader, Read};
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 
-use anyhow::{anyhow, Context, Result};
 use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
 use wayland_client::backend::ObjectId;
 use wayland_client::{
@@ -25,10 +24,58 @@ use wayland_protocols_wlr::data_control::v1::client::{
     zwlr_data_control_source_v1::{self, ZwlrDataControlSourceV1},
 };
 
-use crate::db::Db;
+use crate::db::{Db, DbError};
 use crate::ipc::{self, Request, Response};
 use crate::model::{Kind, MimeContent};
 use crate::paths;
+
+#[derive(Debug, thiserror::Error)]
+pub enum DaemonError {
+    #[error("connect to wayland: {0}")]
+    WaylandConnect(#[source] wayland_client::ConnectError),
+    #[error("wayland registry init: {0}")]
+    RegistryInit(#[source] wayland_client::globals::GlobalError),
+    #[error("compositor missing global `{name}`: {source}")]
+    MissingGlobal {
+        name: &'static str,
+        #[source]
+        source: wayland_client::globals::BindError,
+    },
+    #[error("bind {sock}: {source}")]
+    BindSocket {
+        sock: std::path::PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("wayland dispatch: {0}")]
+    Dispatch(#[from] wayland_client::DispatchError),
+    #[error("wayland: {0}")]
+    Wayland(#[from] wayland_client::backend::WaylandError),
+    #[error("db: {0}")]
+    Db(#[from] DbError),
+    #[error("wayland queue still has pending events")]
+    PendingEvents,
+}
+
+#[derive(Debug, thiserror::Error)]
+enum OfferError {
+    #[error("no acceptable mime in {0:?}")]
+    NoMime(Vec<String>),
+    #[error("empty content for {0}")]
+    EmptyContent(String),
+    #[error("content exceeds {0} byte cap")]
+    TooLarge(usize),
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("pipe: {0}")]
+    Pipe(#[from] nix::Error),
+    #[error("wayland dispatch: {0}")]
+    Dispatch(#[from] wayland_client::DispatchError),
+    #[error("db: {0}")]
+    Db(#[from] DbError),
+}
 
 const TEXT_CAP_BYTES: usize = 1_000_000;
 const IMAGE_CAP_BYTES: usize = 10_000_000;
@@ -63,18 +110,26 @@ impl State {
     }
 }
 
-pub fn run(db: Db) -> Result<()> {
-    let conn = Connection::connect_to_env().context("connect to wayland")?;
+pub fn run(db: Db) -> Result<(), DaemonError> {
+    let conn = Connection::connect_to_env().map_err(DaemonError::WaylandConnect)?;
     let (globals, mut queue) =
-        registry_queue_init::<State>(&conn).context("wayland registry init")?;
+        registry_queue_init::<State>(&conn).map_err(DaemonError::RegistryInit)?;
     let qh = queue.handle();
 
-    let seat: wl_seat::WlSeat = globals
-        .bind(&qh, 1..=9, ())
-        .context("compositor does not expose wl_seat")?;
-    let manager: ZwlrDataControlManagerV1 = globals
-        .bind(&qh, 1..=2, ())
-        .context("compositor does not expose zwlr_data_control_manager_v1")?;
+    let seat: wl_seat::WlSeat =
+        globals
+            .bind(&qh, 1..=9, ())
+            .map_err(|source| DaemonError::MissingGlobal {
+                name: "wl_seat",
+                source,
+            })?;
+    let manager: ZwlrDataControlManagerV1 =
+        globals
+            .bind(&qh, 1..=2, ())
+            .map_err(|source| DaemonError::MissingGlobal {
+                name: "zwlr_data_control_manager_v1",
+                source,
+            })?;
     let device = manager.get_data_device(&seat, &qh, ());
 
     let sock_path = paths::sock_path();
@@ -82,39 +137,32 @@ pub fn run(db: Db) -> Result<()> {
     if let Some(parent) = sock_path.parent() {
         std::fs::create_dir_all(parent).ok();
     }
-    let listener = UnixListener::bind(&sock_path)
-        .with_context(|| format!("bind {sock_path:?}"))?;
+    let listener = UnixListener::bind(&sock_path).map_err(|source| DaemonError::BindSocket {
+        sock: sock_path.clone(),
+        source,
+    })?;
     listener.set_nonblocking(true)?;
 
     let mut state = State::new();
     tracing::info!("clipboard daemon ready (sock={sock_path:?})");
 
     loop {
-        // 1. Drain any wayland events already queued up.
-        queue
-            .dispatch_pending(&mut state)
-            .context("dispatch pending")?;
+        queue.dispatch_pending(&mut state)?;
 
-        // 2. Process a freshly-arrived selection (drain bytes, write db).
         if let Some(offer) = state.pending.take() {
             if let Err(e) = process_offer(&offer, &mut state, &db, &mut queue) {
-                tracing::warn!("drop selection: {e:#}");
+                tracing::warn!("drop selection: {e}");
             }
             state.offer_mimes.remove(&offer.id());
             offer.destroy();
             if let Err(e) = db.prune(DEFAULT_RING_SIZE) {
-                tracing::warn!("prune failed: {e:#}");
+                tracing::warn!("prune failed: {e}");
             }
         }
 
-        // 3. Push out any pending requests so the compositor sees them
-        //    (set_selection, source.offer, ...).
-        queue.flush().context("flush wayland")?;
+        queue.flush()?;
 
-        // 4. Block until either fd is readable.
-        let read_guard = queue
-            .prepare_read()
-            .ok_or_else(|| anyhow!("wayland queue still has pending events"))?;
+        let read_guard = queue.prepare_read().ok_or(DaemonError::PendingEvents)?;
         let wl_fd = read_guard.connection_fd();
         let listener_fd = listener.as_fd();
 
@@ -146,12 +194,12 @@ pub fn run(db: Db) -> Result<()> {
     }
 }
 
-fn poll_two(a: BorrowedFd<'_>, b: BorrowedFd<'_>) -> Result<(bool, bool)> {
+fn poll_two(a: BorrowedFd<'_>, b: BorrowedFd<'_>) -> Result<(bool, bool), std::io::Error> {
     let mut fds = [
         PollFd::new(a, PollFlags::POLLIN),
         PollFd::new(b, PollFlags::POLLIN),
     ];
-    poll(&mut fds, PollTimeout::NONE).context("poll")?;
+    poll(&mut fds, PollTimeout::NONE)?;
     let ready = |i: usize| {
         fds[i]
             .revents()
@@ -254,14 +302,13 @@ fn process_offer(
     state: &mut State,
     db: &Db,
     queue: &mut EventQueue<State>,
-) -> Result<()> {
+) -> Result<(), OfferError> {
     let mimes = state
         .offer_mimes
         .get(&offer.id())
         .cloned()
         .unwrap_or_default();
-    let (kind, primary_mime) = pick_mime(&mimes)
-        .ok_or_else(|| anyhow!("no acceptable mime in {mimes:?}"))?;
+    let (kind, primary_mime) = pick_mime(&mimes).ok_or_else(|| OfferError::NoMime(mimes.clone()))?;
 
     let cap = match kind {
         Kind::Text => TEXT_CAP_BYTES,
@@ -270,7 +317,7 @@ fn process_offer(
 
     let primary_content = receive(offer, &primary_mime, cap, queue, state)?;
     if primary_content.is_empty() {
-        return Err(anyhow!("empty content for {primary_mime}"));
+        return Err(OfferError::EmptyContent(primary_mime));
     }
 
     // Self-loop suppression: while we hold a source, the compositor
@@ -357,25 +404,23 @@ fn receive(
     cap: usize,
     queue: &mut EventQueue<State>,
     state: &mut State,
-) -> Result<Vec<u8>> {
-    let (read_fd, write_fd) = nix::unistd::pipe().context("pipe")?;
+) -> Result<Vec<u8>, OfferError> {
+    let (read_fd, write_fd) = nix::unistd::pipe()?;
 
     offer.receive(mime.to_string(), write_fd.as_fd());
-    queue
-        .roundtrip(state)
-        .context("roundtrip after offer.receive")?;
+    queue.roundtrip(state)?;
     drop(write_fd);
 
     let mut out = Vec::new();
     let mut buf = [0u8; 8192];
     let mut file = std::fs::File::from(read_fd);
     loop {
-        let n = file.read(&mut buf).context("read from clipboard pipe")?;
+        let n = file.read(&mut buf)?;
         if n == 0 {
             break;
         }
         if out.len() + n > cap {
-            return Err(anyhow!("content exceeds {} byte cap", cap));
+            return Err(OfferError::TooLarge(cap));
         }
         out.extend_from_slice(&buf[..n]);
     }

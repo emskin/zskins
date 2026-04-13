@@ -15,7 +15,8 @@ pub fn run() -> Result<()> {
     let db = Db::open(&db_path)?;
     tracing::info!("db={db_path:?} pid={pid_path:?}");
 
-    daemon::run(db)
+    daemon::run(db)?;
+    Ok(())
 }
 
 /// Bulk import a clipman-style JSON array of strings into the db. Older items

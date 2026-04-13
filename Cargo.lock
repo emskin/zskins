@@ -7491,12 +7491,12 @@ dependencies = [
 name = "zofi-clipd"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "blake3",
  "nix 0.29.0",
  "rusqlite",
  "serde",
  "serde_json",
+ "thiserror 2.0.18",
  "tracing",
  "uuid",
  "wayland-client",

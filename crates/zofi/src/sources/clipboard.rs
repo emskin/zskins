@@ -83,7 +83,8 @@ impl ClipboardSource {
             return Ok(Vec::new());
         }
         let db = Db::open(&path)?;
-        db.list(LIST_LIMIT)
+        let entries = db.list(LIST_LIMIT)?;
+        Ok(entries)
     }
 }
 

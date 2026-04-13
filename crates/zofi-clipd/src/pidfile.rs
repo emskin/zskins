@@ -1,9 +1,26 @@
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
 use nix::fcntl::{Flock, FlockArg};
+
+#[derive(Debug, thiserror::Error)]
+pub enum PidError {
+    #[error("open pidfile {path}: {source}")]
+    Open {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("another zofi-clipd already holds {path}: {source}")]
+    AlreadyHeld {
+        path: PathBuf,
+        #[source]
+        source: nix::Error,
+    },
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
+}
 
 /// Exclusive process lock on the daemon's pid file. Held for the lifetime of
 /// `Self`; the lock is released when this is dropped or the process exits.
@@ -12,8 +29,7 @@ pub struct DaemonLock {
 }
 
 impl DaemonLock {
-    /// Take the lock and write our pid. Errors if another instance holds it.
-    pub fn acquire(path: &Path) -> Result<Self> {
+    pub fn acquire(path: &Path) -> Result<Self, PidError> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).ok();
         }
@@ -23,14 +39,18 @@ impl DaemonLock {
             .create(true)
             .truncate(false)
             .open(path)
-            .with_context(|| format!("open {path:?}"))?;
-
-        let mut flock =
-            Flock::lock(file, FlockArg::LockExclusiveNonblock).map_err(|(_, e)| {
-                anyhow::anyhow!("another zofi-clipd already holds {path:?}: {e}")
+            .map_err(|source| PidError::Open {
+                path: path.to_path_buf(),
+                source,
             })?;
 
-        // Truncate + write our pid.
+        let mut flock = Flock::lock(file, FlockArg::LockExclusiveNonblock).map_err(|(_, e)| {
+            PidError::AlreadyHeld {
+                path: path.to_path_buf(),
+                source: e,
+            }
+        })?;
+
         let pid = std::process::id();
         (*flock).set_len(0).ok();
         (*flock).seek(SeekFrom::Start(0)).ok();
