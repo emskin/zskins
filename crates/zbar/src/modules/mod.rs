@@ -5,6 +5,7 @@ pub mod cpu_mem;
 pub mod network;
 pub mod network_popup;
 pub mod tray;
+pub mod tray_menu;
 pub mod volume;
 pub mod window_title;
 pub mod workspaces;

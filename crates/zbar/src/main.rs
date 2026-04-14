@@ -25,6 +25,7 @@ fn main() {
 
     application().run(move |cx: &mut App| {
         cx.bind_keys(zbar::modules::network_popup::key_bindings());
+        cx.bind_keys(zbar::modules::tray_menu::key_bindings());
         let backend = backend.clone();
         let sway_widths = sway_widths.clone();
         // Wayland output events arrive asynchronously after bind; wait briefly so

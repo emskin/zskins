@@ -36,7 +36,7 @@ impl Bar {
         Bar {
             workspaces: cx.new(|cx| WorkspacesModule::new(backend, cx)),
             window_title: cx.new(WindowTitleModule::new),
-            tray: cx.new(TrayModule::new),
+            tray: cx.new(|cx| TrayModule::new(display_id, cx)),
             network: cx.new(|cx| NetworkModule::new(display_id, cx)),
             volume: cx.new(VolumeModule::new),
             brightness: cx.new(BrightnessModule::new),

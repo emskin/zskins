@@ -8,8 +8,13 @@ use std::sync::Arc;
 
 pub struct TrayModule {
     items: BTreeMap<String, TrayItem>,
-    /// Channel to send activation requests back to the D-Bus thread.
     activate_tx: async_channel::Sender<ActivateReq>,
+    menu_click_tx: async_channel::Sender<tray_menu::MenuClickReq>,
+    /// For sending CloseMenu from popup back to ourselves.
+    self_tx: async_channel::Sender<TrayMsg>,
+    display_id: Option<gpui::DisplayId>,
+    menu_popup: Option<gpui::WindowHandle<tray_menu::TrayMenuPopup>>,
+    menu_open_addr: Option<String>,
 }
 
 struct TrayItem {
@@ -20,13 +25,13 @@ struct TrayItem {
 /// Icon data — either pre-decoded pixels (from IconPixmap) or an encoded
 /// image file (PNG/SVG) that GPUI will decode at render time.
 #[derive(Clone)]
-enum TrayIcon {
+pub(crate) enum TrayIcon {
     Pixmap(Arc<RenderImage>),
     File(Arc<gpui::Image>),
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-enum ItemStatus {
+pub(crate) enum ItemStatus {
     #[default]
     Active,
     Passive,
@@ -43,19 +48,34 @@ impl ItemStatus {
     }
 }
 
-enum TrayMsg {
-    Add(String, Option<TrayIcon>, ItemStatus),
+pub(crate) enum TrayMsg {
+    Add {
+        addr: String,
+        icon: Option<TrayIcon>,
+        status: ItemStatus,
+    },
+    CloseMenu,
     UpdateIcon(String, Option<TrayIcon>),
     UpdateStatus(String, ItemStatus),
     Remove(String),
+    /// Menu layout fetched from D-Bus, ready to display.
+    MenuReady {
+        addr: String,
+        menu_path: String,
+        items: Vec<tray_menu::MenuItem>,
+        click_x: f32,
+    },
 }
 
-/// A request from the GPUI thread to perform an action on a tray item.
 #[allow(dead_code)]
 enum ActivateReq {
     Default(String),
     Secondary(String),
+    /// Right-click: fetch and show context menu. Carries click X for positioning.
+    Menu(String, f32),
 }
+
+use super::tray_menu;
 
 // ---------------------------------------------------------------------------
 // zbus proxy definitions
@@ -110,43 +130,72 @@ trait StatusNotifierItem {
 // ---------------------------------------------------------------------------
 
 impl TrayModule {
-    pub fn new(cx: &mut Context<Self>) -> Self {
+    fn close_menu(&mut self, cx: &mut gpui::App) {
+        if let Some(handle) = self.menu_popup.take() {
+            let _ = handle.update(cx, |_, window, _| window.remove_window());
+        }
+        self.menu_open_addr = None;
+    }
+
+    pub fn new(display_id: Option<gpui::DisplayId>, cx: &mut Context<Self>) -> Self {
         let (tx, rx) = async_channel::bounded::<TrayMsg>(32);
+        let self_tx = tx.clone();
         let (activate_tx, activate_rx) = async_channel::bounded::<ActivateReq>(8);
+        let (menu_click_tx, menu_click_rx) = async_channel::bounded::<tray_menu::MenuClickReq>(8);
 
         cx.spawn(async move |this, cx| {
             while let Ok(msg) = rx.recv().await {
                 if this
-                    .update(cx, |m, cx| {
-                        let changed = match msg {
-                            TrayMsg::Add(addr, icon, status) => {
-                                m.items.insert(addr, TrayItem { icon, status });
-                                true
-                            }
-                            TrayMsg::UpdateIcon(addr, icon) => {
-                                if let Some(item) = m.items.get_mut(&addr) {
-                                    item.icon = icon;
-                                    true
-                                } else {
-                                    false
-                                }
-                            }
-                            TrayMsg::UpdateStatus(addr, status) => {
-                                if let Some(item) = m.items.get_mut(&addr) {
-                                    if item.status != status {
-                                        item.status = status;
-                                        true
-                                    } else {
-                                        false
-                                    }
-                                } else {
-                                    false
-                                }
-                            }
-                            TrayMsg::Remove(addr) => m.items.remove(&addr).is_some(),
-                        };
-                        if changed {
+                    .update(cx, |m, cx| match msg {
+                        TrayMsg::Add { addr, icon, status } => {
+                            m.items.insert(addr, TrayItem { icon, status });
                             cx.notify();
+                        }
+                        TrayMsg::UpdateIcon(addr, icon) => {
+                            if let Some(item) = m.items.get_mut(&addr) {
+                                item.icon = icon;
+                                cx.notify();
+                            }
+                        }
+                        TrayMsg::UpdateStatus(addr, status) => {
+                            if let Some(item) = m.items.get_mut(&addr) {
+                                if item.status != status {
+                                    item.status = status;
+                                    cx.notify();
+                                }
+                            }
+                        }
+                        TrayMsg::Remove(addr) => {
+                            if m.items.remove(&addr).is_some() {
+                                cx.notify();
+                            }
+                        }
+                        TrayMsg::CloseMenu => {
+                            m.close_menu(cx);
+                        }
+                        TrayMsg::MenuReady {
+                            addr,
+                            menu_path,
+                            items,
+                            click_x,
+                        } => {
+                            // Toggle: if same addr menu is already open, just close.
+                            if m.menu_open_addr.as_deref() == Some(&addr) {
+                                m.close_menu(cx);
+                                return;
+                            }
+                            m.close_menu(cx);
+                            m.menu_popup = tray_menu::open_menu_popup(
+                                cx,
+                                items,
+                                addr.clone(),
+                                menu_path,
+                                m.menu_click_tx.clone(),
+                                m.self_tx.clone(),
+                                m.display_id,
+                                click_x,
+                            );
+                            m.menu_open_addr = Some(addr);
                         }
                     })
                     .is_err()
@@ -160,13 +209,18 @@ impl TrayModule {
         std::thread::Builder::new()
             .name("tray-sni".into())
             .spawn(move || {
-                async_io::block_on(run_sni_host(tx, activate_rx));
+                async_io::block_on(run_sni_host(tx, activate_rx, menu_click_rx));
             })
             .expect("spawn tray thread");
 
         TrayModule {
             items: BTreeMap::new(),
             activate_tx,
+            menu_click_tx,
+            self_tx,
+            menu_open_addr: None,
+            display_id,
+            menu_popup: None,
         }
     }
 }
@@ -297,10 +351,11 @@ async fn start_watcher(
 async fn run_sni_host(
     tx: async_channel::Sender<TrayMsg>,
     activate_rx: async_channel::Receiver<ActivateReq>,
+    menu_click_rx: async_channel::Receiver<tray_menu::MenuClickReq>,
 ) {
     let mut delay_ms: u64 = 1000;
     loop {
-        match run_sni_session(&tx, &activate_rx).await {
+        match run_sni_session(&tx, &activate_rx, &menu_click_rx).await {
             Ok(()) => return,
             Err(e) => {
                 tracing::warn!("tray: SNI session failed: {e:#}; reconnecting in {delay_ms}ms");
@@ -314,6 +369,7 @@ async fn run_sni_host(
 async fn run_sni_session(
     tx: &async_channel::Sender<TrayMsg>,
     activate_rx: &async_channel::Receiver<ActivateReq>,
+    menu_click_rx: &async_channel::Receiver<tray_menu::MenuClickReq>,
 ) -> anyhow::Result<()> {
     let conn = zbus::Connection::session().await?;
 
@@ -344,12 +400,14 @@ async fn run_sni_session(
     ]));
 
     let ex = async_executor::LocalExecutor::new();
+    let item_metas = std::cell::RefCell::new(BTreeMap::<String, TrayItemMeta>::new());
 
     match watcher.registered_status_notifier_items().await {
         Ok(items) => {
             tracing::info!("tray: found {} initial item(s)", items.len());
             for addr in items {
-                add_item(&conn, &addr, &icon_cache, tx, &ex).await;
+                let meta = add_item(&conn, &addr, &icon_cache, tx, &ex).await;
+                item_metas.borrow_mut().insert(addr, meta);
             }
         }
         Err(e) => {
@@ -361,27 +419,57 @@ async fn run_sni_session(
         futures_lite::future::or(
             ex.tick(),
             futures_lite::future::or(
-                async {
-                    if let Some(ref rx) = watcher_event_rx {
-                        if let Ok(event) = rx.recv().await {
-                            match event {
-                                WatcherEvent::ItemAdded(addr) => {
-                                    tracing::debug!("tray item added: {addr}");
-                                    add_item(&conn, &addr, &icon_cache, tx, &ex).await;
-                                }
-                                WatcherEvent::ItemRemoved(addr) => {
-                                    tracing::debug!("tray item removed: {addr}");
-                                    let _ = tx.send(TrayMsg::Remove(addr)).await;
+                futures_lite::future::or(
+                    async {
+                        if let Some(ref rx) = watcher_event_rx {
+                            if let Ok(event) = rx.recv().await {
+                                match event {
+                                    WatcherEvent::ItemAdded(addr) => {
+                                        if !item_metas.borrow().contains_key(&addr) {
+                                            tracing::debug!("tray item added: {addr}");
+                                            let meta =
+                                                add_item(&conn, &addr, &icon_cache, tx, &ex).await;
+                                            item_metas.borrow_mut().insert(addr, meta);
+                                        }
+                                    }
+                                    WatcherEvent::ItemRemoved(addr) => {
+                                        tracing::debug!("tray item removed: {addr}");
+                                        item_metas.borrow_mut().remove(&addr);
+                                        let _ = tx.send(TrayMsg::Remove(addr)).await;
+                                    }
                                 }
                             }
+                        } else {
+                            futures_lite::future::pending::<()>().await;
                         }
-                    } else {
-                        futures_lite::future::pending::<()>().await;
-                    }
-                },
+                    },
+                    // Menu item click from popup.
+                    async {
+                        if let Ok(req) = menu_click_rx.recv().await {
+                            if let Err(e) = tray_menu::activate_menu_item(
+                                &conn,
+                                &req.addr,
+                                &req.menu_path,
+                                req.item_id,
+                            )
+                            .await
+                            {
+                                tracing::warn!("tray: menu click failed: {e}");
+                            }
+                        }
+                    },
+                ),
                 async {
                     if let Ok(req) = activate_rx.recv().await {
-                        handle_activate(&conn, req).await;
+                        // Extract what we need before the await to avoid
+                        // holding the RefCell borrow across it.
+                        let addr = match &req {
+                            ActivateReq::Default(a)
+                            | ActivateReq::Secondary(a)
+                            | ActivateReq::Menu(a, _) => a.as_str(),
+                        };
+                        let meta = item_metas.borrow().get(addr).cloned();
+                        handle_activate(&conn, tx, meta.as_ref(), req).await;
                     }
                 },
             ),
@@ -394,36 +482,67 @@ async fn run_sni_session(
     }
 }
 
-/// Build a fresh proxy on-demand and activate.
-/// This avoids caching proxies with unsafe lifetime transmute.
-async fn handle_activate(conn: &zbus::Connection, req: ActivateReq) {
+async fn handle_activate(
+    conn: &zbus::Connection,
+    tx: &async_channel::Sender<TrayMsg>,
+    meta: Option<&TrayItemMeta>,
+    req: ActivateReq,
+) {
     let addr = match &req {
-        ActivateReq::Default(a) | ActivateReq::Secondary(a) => a.as_str(),
+        ActivateReq::Default(a) | ActivateReq::Secondary(a) | ActivateReq::Menu(a, _) => a.as_str(),
     };
-    let (destination, path) = parse_address(addr);
-    let proxy = match StatusNotifierItemProxy::builder(conn)
-        .destination(destination.to_string())
-        .and_then(|b| b.path(path.to_string()))
-    {
-        Ok(b) => match b.build().await {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::warn!("tray: activate proxy failed for {addr}: {e}");
-                return;
+
+    match req {
+        ActivateReq::Menu(_, click_x) => {
+            if let Some(menu_path) = meta.and_then(|m| m.menu_path.as_ref()) {
+                match tray_menu::fetch_menu(conn, addr, menu_path).await {
+                    Ok(menu_items) => {
+                        let _ = tx
+                            .send(TrayMsg::MenuReady {
+                                addr: addr.to_string(),
+                                menu_path: menu_path.clone(),
+                                items: menu_items,
+                                click_x,
+                            })
+                            .await;
+                    }
+                    Err(e) => tracing::warn!("tray: fetch menu failed for {addr}: {e}"),
+                }
             }
-        },
-        Err(e) => {
-            tracing::warn!("tray: activate invalid address {addr}: {e}");
-            return;
         }
-    };
-    let result = match req {
-        ActivateReq::Default(_) => proxy.activate(0, 0).await,
-        ActivateReq::Secondary(_) => proxy.secondary_activate(0, 0).await,
-    };
-    if let Err(e) = result {
-        tracing::warn!("tray: activate failed for {addr}: {e}");
+        _ => {
+            let (destination, path) = parse_address(addr);
+            let proxy = match StatusNotifierItemProxy::builder(conn)
+                .destination(destination.to_string())
+                .and_then(|b| b.path(path.to_string()))
+            {
+                Ok(b) => match b.build().await {
+                    Ok(p) => p,
+                    Err(e) => {
+                        tracing::warn!("tray: activate proxy failed for {addr}: {e}");
+                        return;
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!("tray: activate invalid address {addr}: {e}");
+                    return;
+                }
+            };
+            let result = match req {
+                ActivateReq::Default(_) => proxy.activate(0, 0).await,
+                ActivateReq::Secondary(_) => proxy.secondary_activate(0, 0).await,
+                ActivateReq::Menu(_, _) => unreachable!(),
+            };
+            if let Err(e) = result {
+                tracing::warn!("tray: activate failed for {addr}: {e}");
+            }
+        }
     }
+}
+
+#[derive(Clone)]
+struct TrayItemMeta {
+    menu_path: Option<String>,
 }
 
 async fn add_item(
@@ -432,7 +551,7 @@ async fn add_item(
     icon_cache: &Arc<icon_theme::IconCache>,
     tx: &async_channel::Sender<TrayMsg>,
     ex: &async_executor::LocalExecutor<'_>,
-) {
+) -> TrayItemMeta {
     let (destination, path) = parse_address(addr);
     let proxy = match StatusNotifierItemProxy::builder(conn)
         .destination(destination.to_string())
@@ -442,12 +561,12 @@ async fn add_item(
             Ok(p) => p,
             Err(e) => {
                 tracing::warn!("tray: failed to build proxy for {addr}: {e}");
-                return;
+                return TrayItemMeta { menu_path: None };
             }
         },
         Err(e) => {
             tracing::warn!("tray: invalid address {addr}: {e}");
-            return;
+            return TrayItemMeta { menu_path: None };
         }
     };
 
@@ -457,8 +576,21 @@ async fn add_item(
         .await
         .map(|s| ItemStatus::from_str(&s))
         .unwrap_or_default();
+    let menu_path = proxy
+        .inner()
+        .get_property::<zbus::zvariant::OwnedObjectPath>("Menu")
+        .await
+        .ok()
+        .map(|p| p.to_string())
+        .filter(|p| !p.is_empty() && p != "/");
 
-    let _ = tx.send(TrayMsg::Add(addr.to_string(), icon, status)).await;
+    let _ = tx
+        .send(TrayMsg::Add {
+            addr: addr.to_string(),
+            icon,
+            status,
+        })
+        .await;
 
     // Spawn NewIcon watcher.
     {
@@ -515,6 +647,8 @@ async fn add_item(
         })
         .detach();
     }
+
+    TrayItemMeta { menu_path }
 }
 
 /// Fetch the current icon, bypassing zbus property cache by using
@@ -523,51 +657,98 @@ async fn fetch_icon(
     proxy: &StatusNotifierItemProxy<'_>,
     icon_cache: &icon_theme::IconCache,
 ) -> Option<TrayIcon> {
-    let props = zbus::fdo::PropertiesProxy::builder(proxy.inner().connection())
-        .destination(proxy.inner().destination().to_string())
-        .ok()?
-        .path(proxy.inner().path().to_string())
-        .ok()?
-        .build()
-        .await
-        .ok()?;
+    let dest = proxy.inner().destination().to_string();
+    let path = proxy.inner().path().to_string();
+    tracing::debug!("tray: fetch_icon dest={dest} path={path}");
+    let props = match zbus::fdo::PropertiesProxy::builder(proxy.inner().connection())
+        .destination(dest.as_str())
+        .and_then(|b| b.path(path.as_str()))
+    {
+        Ok(b) => b.build().await,
+        Err(e) => {
+            tracing::debug!("tray: PropertiesProxy builder failed: {e}");
+            return None;
+        }
+    };
+    let props = match props {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::debug!("tray: PropertiesProxy build failed: {e}");
+            return None;
+        }
+    };
 
-    let sni_iface =
-        zbus::names::InterfaceName::from_static_str_unchecked("org.kde.StatusNotifierItem");
+    // Try multiple interface names — KDE, freedesktop, and Ayatana.
+    let ifaces = [
+        "org.kde.StatusNotifierItem",
+        "org.freedesktop.StatusNotifierItem",
+        "org.ayatana.StatusNotifierItem",
+    ];
 
-    // Try IconPixmap first.
-    if let Ok(val) = props.get(sni_iface.clone(), "IconPixmap").await {
-        if let Ok(pixmaps) = <Vec<(i32, i32, Vec<u8>)>>::try_from(val) {
-            tracing::debug!("tray: IconPixmap returned {} entries", pixmaps.len());
-            if let Some(img) = best_pixmap_from_tuples(&pixmaps) {
-                return Some(TrayIcon::Pixmap(img));
+    let mut pixmap_result = None;
+    let mut icon_name = String::new();
+
+    for iface_str in &ifaces {
+        let iface = zbus::names::InterfaceName::from_static_str_unchecked(iface_str);
+
+        if pixmap_result.is_none() {
+            match props.get(iface.clone(), "IconPixmap").await {
+                Ok(val) => {
+                    if let Ok(pixmaps) = <Vec<(i32, i32, Vec<u8>)>>::try_from(val) {
+                        tracing::debug!(
+                            "tray: IconPixmap returned {} entries via {iface_str}",
+                            pixmaps.len()
+                        );
+                        pixmap_result = best_pixmap_from_tuples(&pixmaps);
+                    }
+                }
+                Err(e) => tracing::debug!("tray: IconPixmap via {iface_str}: {e}"),
             }
+        }
+
+        if icon_name.is_empty() {
+            match props.get(iface, "IconName").await {
+                Ok(val) => match String::try_from(val) {
+                    Ok(s) if !s.is_empty() => icon_name = s,
+                    _ => {}
+                },
+                Err(e) => tracing::debug!("tray: IconName via {iface_str}: {e}"),
+            }
+        }
+
+        if pixmap_result.is_some() || !icon_name.is_empty() {
+            break;
         }
     }
 
-    // Fall back to IconName.
-    let name: String = props
-        .get(sni_iface.clone(), "IconName")
-        .await
-        .ok()
-        .and_then(|v| String::try_from(v).ok())
-        .unwrap_or_default();
+    if let Some(img) = pixmap_result {
+        return Some(TrayIcon::Pixmap(img));
+    }
+
+    let name = icon_name;
     if name.is_empty() {
-        tracing::debug!("tray: no icon_name available");
+        tracing::debug!("tray: no icon available");
         return None;
     }
 
+    tracing::debug!("tray: icon_name={name}");
     if name.starts_with('/') {
         return load_icon_file(std::path::Path::new(&name));
     }
 
     // Check app-specific IconThemePath first.
-    let theme_path: String = props
-        .get(sni_iface.clone(), "IconThemePath")
-        .await
-        .ok()
-        .and_then(|v| String::try_from(v).ok())
-        .unwrap_or_default();
+    let mut theme_path = String::new();
+    for iface_str in &ifaces {
+        let iface = zbus::names::InterfaceName::from_static_str_unchecked(iface_str);
+        if let Ok(val) = props.get(iface, "IconThemePath").await {
+            if let Ok(s) = String::try_from(val) {
+                if !s.is_empty() {
+                    theme_path = s;
+                    break;
+                }
+            }
+        }
+    }
     if !theme_path.is_empty() {
         let dir = std::path::Path::new(&theme_path);
         for ext in &["svg", "svgz", "png"] {
@@ -624,9 +805,20 @@ static NEXT_IMAGE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU6
 
 fn load_icon_file(path: &std::path::Path) -> Option<TrayIcon> {
     let bytes = std::fs::read(path).ok()?;
-    let format = match path.extension()?.to_str()? {
+    let ext = path.extension()?.to_str()?;
+    let format = match ext {
         "svg" | "svgz" => gpui::ImageFormat::Svg,
         "png" => gpui::ImageFormat::Png,
+        // ICO/BMP/etc: decode via `image` crate to RGBA pixels.
+        "ico" | "bmp" | "jpg" | "jpeg" | "gif" => {
+            let mut img = image::load_from_memory(&bytes).ok()?.into_rgba8();
+            // Swap R↔B for BGRA — GPUI's RenderImage expects BGRA layout.
+            for pixel in img.pixels_mut() {
+                pixel.0.swap(0, 2);
+            }
+            let frame = image::Frame::new(img);
+            return Some(TrayIcon::Pixmap(Arc::new(RenderImage::new(vec![frame]))));
+        }
         _ => return None,
     };
     // Recolor symbolic SVG icons for dark panel — Breeze/KDE use
@@ -659,7 +851,7 @@ fn recolor_svg_for_dark_panel(bytes: Vec<u8>) -> Vec<u8> {
     svg.into_bytes()
 }
 
-fn parse_address(address: &str) -> (&str, &str) {
+pub fn parse_address(address: &str) -> (&str, &str) {
     if let Some(slash) = address.find('/') {
         (&address[..slash], &address[slash..])
     } else {
@@ -716,7 +908,10 @@ impl Render for TrayModule {
             }
 
             let activate_tx = self.activate_tx.clone();
+            let activate_tx_menu = self.activate_tx.clone();
+            let self_tx = self.self_tx.clone();
             let addr_click = addr.clone();
+            let addr_menu = addr.clone();
 
             let base = div()
                 .id(gpui::ElementId::Name(addr.clone().into()))
@@ -725,7 +920,13 @@ impl Render for TrayModule {
                 .hover(|s| s.bg(theme::surface_hover()))
                 .p(gpui::px(2.0))
                 .on_mouse_down(MouseButton::Left, move |_, _, _cx| {
+                    // Close any open menu first.
+                    let _ = self_tx.try_send(TrayMsg::CloseMenu);
                     let _ = activate_tx.try_send(ActivateReq::Default(addr_click.clone()));
+                })
+                .on_mouse_down(MouseButton::Right, move |ev, _, _cx| {
+                    let x: f32 = ev.position.x.into();
+                    let _ = activate_tx_menu.try_send(ActivateReq::Menu(addr_menu.clone(), x));
                 });
 
             let child = if let Some(ref icon) = item.icon {
