@@ -1,7 +1,8 @@
 use crate::theme;
 use gpui::{
-    div, img, Context, ImageSource, InteractiveElement, IntoElement, MouseButton, ParentElement,
-    Render, RenderImage, Styled, Window,
+    div, img, px, AnyView, App, AppContext, Context, ImageSource, InteractiveElement, IntoElement,
+    MouseButton, ParentElement, Render, RenderImage, SharedString, StatefulInteractiveElement,
+    Styled, Window,
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -20,6 +21,21 @@ pub struct TrayModule {
 struct TrayItem {
     icon: Option<TrayIcon>,
     status: ItemStatus,
+    tooltip: Option<Tooltip>,
+}
+
+/// Parsed subset of the SNI `ToolTip` property `(s icon_name, a(iiay) icon_pixmap,
+/// s title, s description)`. We only surface the text for now.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Tooltip {
+    pub title: String,
+    pub description: String,
+}
+
+impl Tooltip {
+    fn is_empty(&self) -> bool {
+        self.title.is_empty() && self.description.is_empty()
+    }
 }
 
 /// Icon data — either pre-decoded pixels (from IconPixmap) or an encoded
@@ -53,10 +69,12 @@ pub(crate) enum TrayMsg {
         addr: String,
         icon: Option<TrayIcon>,
         status: ItemStatus,
+        tooltip: Option<Tooltip>,
     },
     CloseMenu,
     UpdateIcon(String, Option<TrayIcon>),
     UpdateStatus(String, ItemStatus),
+    UpdateTooltip(String, Option<Tooltip>),
     Remove(String),
     /// Menu layout fetched from D-Bus, ready to display.
     MenuReady {
@@ -126,6 +144,9 @@ trait StatusNotifierItem {
 
     #[zbus(signal)]
     fn new_status(&self, status: &str) -> zbus::Result<()>;
+
+    #[zbus(signal)]
+    fn new_tool_tip(&self) -> zbus::Result<()>;
 }
 
 // ---------------------------------------------------------------------------
@@ -150,8 +171,20 @@ impl TrayModule {
             while let Ok(msg) = rx.recv().await {
                 if this
                     .update(cx, |m, cx| match msg {
-                        TrayMsg::Add { addr, icon, status } => {
-                            m.items.insert(addr, TrayItem { icon, status });
+                        TrayMsg::Add {
+                            addr,
+                            icon,
+                            status,
+                            tooltip,
+                        } => {
+                            m.items.insert(
+                                addr,
+                                TrayItem {
+                                    icon,
+                                    status,
+                                    tooltip,
+                                },
+                            );
                             cx.notify();
                         }
                         TrayMsg::UpdateIcon(addr, icon) => {
@@ -164,6 +197,14 @@ impl TrayModule {
                             if let Some(item) = m.items.get_mut(&addr) {
                                 if item.status != status {
                                     item.status = status;
+                                    cx.notify();
+                                }
+                            }
+                        }
+                        TrayMsg::UpdateTooltip(addr, tooltip) => {
+                            if let Some(item) = m.items.get_mut(&addr) {
+                                if item.tooltip != tooltip {
+                                    item.tooltip = tooltip;
                                     cx.notify();
                                 }
                             }
@@ -708,12 +749,14 @@ async fn add_item(
         .ok()
         .map(|p| p.to_string())
         .filter(|p| !p.is_empty() && p != "/");
+    let tooltip = fetch_tooltip(&proxy).await;
 
     let _ = tx
         .send(TrayMsg::Add {
             addr: addr.to_string(),
             icon,
             status,
+            tooltip,
         })
         .await;
 
@@ -773,7 +816,96 @@ async fn add_item(
         .detach();
     }
 
+    // Spawn NewToolTip watcher.
+    {
+        let tx = tx.clone();
+        let addr = addr.to_string();
+        let proxy_inner = proxy.inner().clone();
+        ex.spawn(async move {
+            use futures_lite::StreamExt;
+            let proxy = StatusNotifierItemProxy::from(proxy_inner);
+            let Ok(mut stream) = proxy.receive_new_tool_tip().await else {
+                return;
+            };
+            while stream.next().await.is_some() {
+                let tooltip = fetch_tooltip(&proxy).await;
+                if tx
+                    .send(TrayMsg::UpdateTooltip(addr.clone(), tooltip))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
     TrayItemMeta { menu_path }
+}
+
+/// Fetch the SNI `ToolTip` property via Properties.Get, trying each
+/// known interface name. Signature is `(s icon_name, a(iiay) icon_pixmap,
+/// s title, s description)` — we only read the two string fields.
+async fn fetch_tooltip(proxy: &StatusNotifierItemProxy<'_>) -> Option<Tooltip> {
+    use zbus::zvariant::Value;
+
+    let dest = proxy.inner().destination().to_string();
+    let path = proxy.inner().path().to_string();
+    let props = match zbus::fdo::PropertiesProxy::builder(proxy.inner().connection())
+        .destination(dest.as_str())
+        .and_then(|b| b.path(path.as_str()))
+    {
+        Ok(b) => b.build().await.ok()?,
+        Err(_) => return None,
+    };
+
+    let ifaces = [
+        "org.kde.StatusNotifierItem",
+        "org.freedesktop.StatusNotifierItem",
+        "org.ayatana.StatusNotifierItem",
+    ];
+
+    for iface_str in &ifaces {
+        let iface = zbus::names::InterfaceName::from_static_str_unchecked(iface_str);
+        let Ok(val) = props.get(iface, "ToolTip").await else {
+            continue;
+        };
+        // Unwrap one level: Properties.Get returns Value::Value(inner).
+        let inner: Value<'_> = val.into();
+        let structure = match inner {
+            Value::Structure(s) => s,
+            _ => continue,
+        };
+        if let Some(t) = tooltip_from_structure(&structure) {
+            return Some(t);
+        }
+    }
+    None
+}
+
+fn tooltip_from_structure(s: &zbus::zvariant::Structure<'_>) -> Option<Tooltip> {
+    let fields = s.fields();
+    // Expect 4 fields: icon_name(s), icon_pixmap(a(iiay)), title(s), description(s).
+    if fields.len() < 4 {
+        return None;
+    }
+    let title = field_as_string(&fields[2]).unwrap_or_default();
+    let description = field_as_string(&fields[3]).unwrap_or_default();
+    let tt = Tooltip { title, description };
+    if tt.is_empty() {
+        None
+    } else {
+        Some(tt)
+    }
+}
+
+fn field_as_string(v: &zbus::zvariant::Value<'_>) -> Option<String> {
+    use zbus::zvariant::Value;
+    match v {
+        Value::Str(s) => Some(s.as_str().to_owned()),
+        _ => None,
+    }
 }
 
 /// Fetch the current icon, bypassing zbus property cache by using
@@ -1036,6 +1168,49 @@ fn argb_be_to_bgra(pixels: &[u8]) -> Vec<u8> {
 
 const ICON_SIZE: gpui::Pixels = gpui::px(18.0);
 
+/// Minimal floating tooltip view used for tray hover text. SNI tooltips are
+/// plain strings (title + optional description) — no markup — so we render
+/// them as a small pill with panel colors matching the rest of the bar.
+struct SimpleTooltip {
+    title: SharedString,
+    description: SharedString,
+}
+
+impl Render for SimpleTooltip {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        let mut col = div()
+            .flex()
+            .flex_col()
+            .gap_0p5()
+            .px_2()
+            .py_1()
+            .rounded_sm()
+            .bg(theme::surface())
+            .border_1()
+            .border_color(theme::border())
+            .text_color(theme::fg())
+            .text_size(px(12.0));
+
+        if !self.title.is_empty() {
+            col = col.child(div().child(self.title.clone()));
+        }
+        if !self.description.is_empty() {
+            col = col.child(
+                div()
+                    .text_color(theme::fg_dim())
+                    .child(self.description.clone()),
+            );
+        }
+        col
+    }
+}
+
+fn build_tooltip_view(tooltip: &Tooltip, cx: &mut App) -> AnyView {
+    let title: SharedString = tooltip.title.clone().into();
+    let description: SharedString = tooltip.description.clone().into();
+    cx.new(|_| SimpleTooltip { title, description }).into()
+}
+
 impl Render for TrayModule {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         let mut row = div().flex().items_center().gap_0p5();
@@ -1092,6 +1267,18 @@ impl Render for TrayModule {
                         orientation,
                     ));
                 });
+
+            // Attach hover tooltip when ToolTip property carries any text.
+            let base = if let Some(ref tt) = item.tooltip {
+                if tt.is_empty() {
+                    base
+                } else {
+                    let tt = tt.clone();
+                    base.tooltip(move |_window, cx| build_tooltip_view(&tt, cx))
+                }
+            } else {
+                base
+            };
 
             let child = if let Some(ref icon) = item.icon {
                 base.child(match icon {
