@@ -789,23 +789,10 @@ async fn add_item(
         }
     };
 
-    // IconThemePath is immutable per-item, so fetch once up-front and reuse
-    // on every subsequent NewIcon signal instead of paying for a round trip.
-    let icon_theme_path = fetch_icon_theme_path(&proxy).await;
-    let icon = fetch_icon(&proxy, icon_cache, icon_theme_path.as_deref()).await;
-    let status = proxy
-        .status()
-        .await
-        .map(|s| ItemStatus::from_str(&s))
-        .unwrap_or_default();
-    let menu_path = proxy
-        .inner()
-        .get_property::<zbus::zvariant::OwnedObjectPath>("Menu")
-        .await
-        .ok()
-        .map(|p| p.to_string())
-        .filter(|p| !p.is_empty() && p != "/");
-    let tooltip = fetch_tooltip(&proxy).await;
+    // Batch-fetch every property we need in one D-Bus round trip
+    // (Properties.GetAll) instead of 4–5 sequential Get calls.
+    let (icon, status, menu_path, tooltip, icon_theme_path) =
+        fetch_all_item_props(&proxy, icon_cache).await;
 
     let _ = tx
         .send(TrayMsg::Add {
@@ -904,22 +891,107 @@ async fn add_item(
     }
 }
 
-/// Fetch the `IconThemePath` property once — it is immutable per the SNI
-/// spec, so the result can be cached on the `TrayItemMeta` and reused on
-/// every NewIcon signal instead of re-issuing a D-Bus round trip.
-async fn fetch_icon_theme_path(proxy: &StatusNotifierItemProxy<'_>) -> Option<String> {
+/// Batch-fetch every property we need about a newly-registered tray item.
+///
+/// Tries `Properties.GetAll` for each candidate SNI interface in order;
+/// the first one that yields a non-empty property map wins. This replaces
+/// what used to be ~10 sequential D-Bus calls (per-property × per-interface
+/// probing) with typically a single round trip. If no interface returns
+/// anything usable, we fall back to per-property probing for the icon so
+/// apps that implement `Get` but not `GetAll` still render.
+async fn fetch_all_item_props(
+    proxy: &StatusNotifierItemProxy<'_>,
+    icon_cache: &icon_theme::IconCache,
+) -> (
+    Option<TrayIcon>,
+    ItemStatus,
+    Option<String>,
+    Option<Tooltip>,
+    Option<String>,
+) {
+    use zbus::zvariant::{OwnedValue, Value};
+
     let dest = proxy.inner().destination().to_string();
     let path = proxy.inner().path().to_string();
-    let props = zbus::fdo::PropertiesProxy::builder(proxy.inner().connection())
+    let builder = match zbus::fdo::PropertiesProxy::builder(proxy.inner().connection())
         .destination(dest.as_str())
         .and_then(|b| b.path(path.as_str()))
-        .ok()?
-        .build()
-        .await
-        .ok()?;
-    get_sni_prop::<String>(&props, "IconThemePath")
-        .await
-        .filter(|s| !s.is_empty())
+    {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::debug!("tray: PropertiesProxy builder failed: {e}");
+            return (None, ItemStatus::default(), None, None, None);
+        }
+    };
+    let props = match builder.build().await {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::debug!("tray: PropertiesProxy build failed: {e}");
+            return (None, ItemStatus::default(), None, None, None);
+        }
+    };
+
+    let mut all: std::collections::HashMap<String, OwnedValue> = Default::default();
+    for iface_str in &SNI_INTERFACES {
+        let iface = zbus::names::InterfaceName::from_static_str_unchecked(iface_str);
+        match props.get_all(iface).await {
+            Ok(map) if !map.is_empty() => {
+                all = map;
+                break;
+            }
+            Ok(_) => continue,
+            Err(e) => {
+                tracing::debug!("tray: GetAll via {iface_str}: {e}");
+                continue;
+            }
+        }
+    }
+
+    let take = |m: &mut std::collections::HashMap<String, OwnedValue>, key: &str| m.remove(key);
+
+    let icon_name = take(&mut all, "IconName")
+        .and_then(|v| String::try_from(v).ok())
+        .unwrap_or_default();
+    let pixmap_result = take(&mut all, "IconPixmap")
+        .and_then(|v| <Vec<(i32, i32, Vec<u8>)>>::try_from(v).ok())
+        .and_then(|p| {
+            tracing::debug!("tray: IconPixmap returned {} entries", p.len());
+            best_pixmap_from_tuples(&p)
+        });
+    let icon_theme_path = take(&mut all, "IconThemePath")
+        .and_then(|v| String::try_from(v).ok())
+        .filter(|s| !s.is_empty());
+    let status = take(&mut all, "Status")
+        .and_then(|v| String::try_from(v).ok())
+        .map(|s| ItemStatus::from_str(&s))
+        .unwrap_or_default();
+    let menu_path = take(&mut all, "Menu")
+        .and_then(|v| zbus::zvariant::OwnedObjectPath::try_from(v).ok())
+        .map(|p| p.to_string())
+        .filter(|p| !p.is_empty() && p != "/");
+    let tooltip = take(&mut all, "ToolTip").and_then(|v| {
+        let inner: Value<'_> = v.into();
+        let Value::Structure(s) = inner else {
+            return None;
+        };
+        tooltip_from_structure(&s)
+    });
+
+    // If GetAll didn't yield any of the icon bits (some apps only
+    // implement Get), fall back to the per-property probe so we still
+    // surface an icon rather than rendering a blank slot.
+    let icon = if pixmap_result.is_some() || !icon_name.is_empty() {
+        resolve_icon(
+            pixmap_result,
+            &icon_name,
+            icon_theme_path.as_deref(),
+            icon_cache,
+        )
+    } else {
+        fetch_icon(proxy, icon_cache, icon_theme_path.as_deref()).await
+    };
+
+    (icon, status, menu_path, tooltip, icon_theme_path)
 }
 
 /// Fetch the SNI `ToolTip` property via Properties.Get, trying each
