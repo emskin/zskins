@@ -170,7 +170,11 @@ pub async fn activate_menu_item(
 // ---------------------------------------------------------------------------
 
 pub struct TrayMenuPopup {
+    /// Root menu items.
     items: Vec<MenuItem>,
+    /// Drill-down navigation stack. Each entry is (parent_label, items_at_that_level).
+    /// Empty stack == at root.
+    stack: Vec<(String, Vec<MenuItem>)>,
     addr: String,
     menu_path: String,
     click_tx: async_channel::Sender<MenuClickReq>,
@@ -196,6 +200,7 @@ impl TrayMenuPopup {
     ) -> Self {
         Self {
             items,
+            stack: Vec::new(),
             addr,
             menu_path,
             click_tx,
@@ -204,7 +209,20 @@ impl TrayMenuPopup {
         }
     }
 
-    fn dismiss(&mut self, _: &Dismiss, window: &mut Window, _cx: &mut Context<Self>) {
+    /// Items visible at the current drill-down level.
+    fn current_items(&self) -> &[MenuItem] {
+        match self.stack.last() {
+            Some((_, items)) => items,
+            None => &self.items,
+        }
+    }
+
+    /// Escape key: if inside a submenu, pop one level; otherwise close the popup.
+    fn dismiss(&mut self, _: &Dismiss, window: &mut Window, cx: &mut Context<Self>) {
+        if self.stack.pop().is_some() {
+            cx.notify();
+            return;
+        }
         let _ = self.close_tx.try_send(super::tray::TrayMsg::CloseMenu);
         window.remove_window();
     }
@@ -240,11 +258,19 @@ impl Render for TrayMenuPopup {
             .min_w(px(180.))
             .overflow_hidden();
 
-        for item in &self.items {
+        // "Back" row when inside a submenu.
+        if let Some((parent_label, _)) = self.stack.last() {
+            col = col.child(self.render_back(parent_label.clone(), cx));
+            col = col.child(div().h(px(1.)).my(px(3.)).bg(theme::separator()));
+        }
+
+        // Clone current-level items to avoid borrowing self across the loop.
+        let items: Vec<MenuItem> = self.current_items().to_vec();
+        for item in &items {
             if !item.visible {
                 continue;
             }
-            col = col.child(self.render_item(item));
+            col = col.child(self.render_item(item, cx));
         }
 
         col
@@ -252,7 +278,31 @@ impl Render for TrayMenuPopup {
 }
 
 impl TrayMenuPopup {
-    fn render_item(&self, item: &MenuItem) -> gpui::AnyElement {
+    fn render_back(&self, parent_label: String, cx: &mut Context<Self>) -> gpui::AnyElement {
+        div()
+            .id("menu-back")
+            .px_2()
+            .py(px(4.))
+            .rounded_sm()
+            .flex()
+            .items_center()
+            .gap_2()
+            .cursor_pointer()
+            .hover(|s| s.bg(theme::surface_hover()))
+            .text_color(theme::fg_dim())
+            .child(div().w(px(14.)).child("←"))
+            .child(div().flex_1().child(format!("Back to {parent_label}")))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _window, cx| {
+                    this.stack.pop();
+                    cx.notify();
+                }),
+            )
+            .into_any_element()
+    }
+
+    fn render_item(&self, item: &MenuItem, cx: &mut Context<Self>) -> gpui::AnyElement {
         if item.menu_type == MenuItemType::Separator {
             return div()
                 .h(px(1.))
@@ -267,10 +317,7 @@ impl TrayMenuPopup {
             theme::fg_dim()
         };
 
-        let click_tx = self.click_tx.clone();
-        let addr = self.addr.clone();
-        let menu_path = self.menu_path.clone();
-        let item_id = item.id;
+        let has_submenu = !item.submenu.is_empty();
         let enabled = item.enabled;
 
         let mut row = div()
@@ -283,7 +330,25 @@ impl TrayMenuPopup {
             .items_center()
             .gap_2();
 
-        if enabled {
+        if enabled && has_submenu {
+            // Drill-down: push this submenu onto the stack.
+            let submenu = item.submenu.clone();
+            let label = item.label.clone();
+            row = row
+                .cursor_pointer()
+                .hover(|s| s.bg(theme::surface_hover()))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, _window, cx| {
+                        this.stack.push((label.clone(), submenu.clone()));
+                        cx.notify();
+                    }),
+                );
+        } else if enabled {
+            let click_tx = self.click_tx.clone();
+            let addr = self.addr.clone();
+            let menu_path = self.menu_path.clone();
+            let item_id = item.id;
             row = row
                 .cursor_pointer()
                 .hover(|s| s.bg(theme::surface_hover()))
@@ -311,12 +376,24 @@ impl TrayMenuPopup {
         row = row.child(div().flex_1().child(item.label.clone()));
 
         // Submenu arrow.
-        if !item.submenu.is_empty() {
+        if has_submenu {
             row = row.child(div().text_color(theme::fg_dim()).child("▸"));
         }
 
         row.into_any_element()
     }
+}
+
+/// Max number of visible items at any level of the menu tree.
+/// Used to size the popup window so deeper submenus still fit.
+fn max_visible_level(items: &[MenuItem]) -> usize {
+    let here = items.iter().filter(|i| i.visible).count();
+    let deepest_child = items
+        .iter()
+        .map(|i| max_visible_level(&i.submenu))
+        .max()
+        .unwrap_or(0);
+    here.max(deepest_child)
 }
 
 // ---------------------------------------------------------------------------
@@ -339,7 +416,8 @@ pub(crate) fn open_menu_popup(
     display_id: Option<DisplayId>,
     click_x: f32,
 ) -> Option<gpui::WindowHandle<TrayMenuPopup>> {
-    let visible_count = items.iter().filter(|i| i.visible).count().max(1);
+    // Height must accommodate the deepest submenu we could drill into (+1 for "Back" row).
+    let visible_count = max_visible_level(&items).max(1) + 1;
     let height = (visible_count as f32) * 26.0 + 12.0;
     let menu_width: f32 = 220.0;
 
