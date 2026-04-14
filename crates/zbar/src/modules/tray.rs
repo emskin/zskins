@@ -515,27 +515,8 @@ async fn run_sni_session(
 
     // Start our Watcher — returns a channel for item registrations
     // (D-Bus doesn't loop signals back to the same connection).
-    let watcher_event_rx = match start_watcher(&conn).await {
-        Ok(handle) => {
-            // Spawn the owner-lost cleanup task. Runs for the lifetime
-            // of this session (ex.tick() below drives it).
-            let cleanup_conn = conn.clone();
-            let cleanup_state = handle.state.clone();
-            let cleanup_tx = handle.event_tx.clone();
-            std::thread::Builder::new()
-                .name("tray-sni-cleanup".into())
-                .spawn(move || {
-                    async_io::block_on(async move {
-                        if let Err(e) =
-                            watch_name_owner_changed(cleanup_conn, cleanup_state, cleanup_tx).await
-                        {
-                            tracing::warn!("tray: NameOwnerChanged watcher ended: {e}");
-                        }
-                    });
-                })
-                .expect("spawn tray cleanup thread");
-            Some(handle.event_rx)
-        }
+    let watcher_handle = match start_watcher(&conn).await {
+        Ok(handle) => Some(handle),
         Err(e) => {
             tracing::debug!("tray: watcher start skipped: {e}");
             None
@@ -560,6 +541,27 @@ async fn run_sni_session(
 
     let ex = async_executor::LocalExecutor::new();
     let item_metas = std::cell::RefCell::new(BTreeMap::<String, TrayItemMeta>::new());
+
+    // Spawn the owner-lost cleanup task on the session-local executor so it
+    // is cancelled automatically when this session ends (ex is dropped on
+    // reconnect), preventing a thread leak across reconnect cycles.
+    let watcher_event_rx = match watcher_handle {
+        Some(handle) => {
+            let cleanup_conn = conn.clone();
+            let cleanup_state = handle.state.clone();
+            let cleanup_tx = handle.event_tx.clone();
+            ex.spawn(async move {
+                if let Err(e) =
+                    watch_name_owner_changed(cleanup_conn, cleanup_state, cleanup_tx).await
+                {
+                    tracing::warn!("tray: NameOwnerChanged watcher ended: {e}");
+                }
+            })
+            .detach();
+            Some(handle.event_rx)
+        }
+        None => None,
+    };
 
     match watcher.registered_status_notifier_items().await {
         Ok(items) => {
