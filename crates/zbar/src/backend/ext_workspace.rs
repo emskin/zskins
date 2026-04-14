@@ -17,6 +17,24 @@ use crate::backend::{
     EventSink, Workspace, WorkspaceBackend, WorkspaceEvent, WorkspaceId, WorkspaceState,
 };
 
+#[derive(Debug, thiserror::Error)]
+pub enum ExtWorkspaceError {
+    #[error("wayland connect: {0}")]
+    Connect(#[from] wayland_client::ConnectError),
+    #[error("wayland global error: {0}")]
+    Global(#[from] wayland_client::globals::GlobalError),
+    #[error("wayland dispatch: {0}")]
+    Dispatch(#[from] wayland_client::DispatchError),
+    #[error("failed to bind ext_workspace_manager_v1: {0}")]
+    BindManager(wayland_client::globals::BindError),
+    #[error("wayland protocol: {0}")]
+    Wayland(#[from] wayland_client::backend::WaylandError),
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
+}
+
+type Result<T> = std::result::Result<T, ExtWorkspaceError>;
+
 #[derive(Default, Clone)]
 struct WsBuilder {
     name: Option<String>,
@@ -217,17 +235,14 @@ impl WorkspaceBackend for ExtWorkspaceBackend {
     }
 }
 
-fn run_session(
-    sink: EventSink,
-    activate_request: Arc<Mutex<Option<WorkspaceId>>>,
-) -> anyhow::Result<()> {
+fn run_session(sink: EventSink, activate_request: Arc<Mutex<Option<WorkspaceId>>>) -> Result<()> {
     let conn = Connection::connect_to_env()?;
     let (globals, mut event_queue): (_, EventQueue<AppState>) = registry_queue_init(&conn)?;
     let qh = event_queue.handle();
 
     let manager: ExtWorkspaceManagerV1 = globals
         .bind(&qh, 1..=1, ())
-        .map_err(|e| anyhow::anyhow!("failed to bind ext_workspace_manager_v1: {e}"))?;
+        .map_err(ExtWorkspaceError::BindManager)?;
 
     let mut state = AppState {
         workspaces: HashMap::new(),
