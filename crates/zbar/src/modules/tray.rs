@@ -7,6 +7,18 @@ use gpui::{
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+#[derive(Debug, thiserror::Error)]
+pub enum TrayError {
+    #[error("dbus: {0}")]
+    Dbus(#[from] zbus::Error),
+    #[error("fdo: {0}")]
+    Fdo(#[from] zbus::fdo::Error),
+    #[error("invalid host name: {0}")]
+    InvalidName(String),
+}
+
+type Result<T> = std::result::Result<T, TrayError>;
+
 pub struct TrayModule {
     items: BTreeMap<String, TrayItem>,
     activate_tx: async_channel::Sender<ActivateReq>,
@@ -383,7 +395,7 @@ struct WatcherHandle {
     event_tx: async_channel::Sender<WatcherEvent>,
 }
 
-async fn start_watcher(conn: &zbus::Connection) -> anyhow::Result<WatcherHandle> {
+async fn start_watcher(conn: &zbus::Connection) -> Result<WatcherHandle> {
     let (event_tx, event_rx) = async_channel::bounded(32);
     let state: Arc<WatcherState> = Arc::new(WatcherState::default());
     let watcher = SniWatcher {
@@ -413,7 +425,7 @@ async fn watch_name_owner_changed(
     conn: zbus::Connection,
     state: Arc<WatcherState>,
     event_tx: async_channel::Sender<WatcherEvent>,
-) -> anyhow::Result<()> {
+) -> Result<()> {
     use futures_lite::StreamExt;
 
     let dbus = zbus::fdo::DBusProxy::new(&conn).await?;
@@ -510,7 +522,7 @@ async fn run_sni_session(
     tx: &async_channel::Sender<TrayMsg>,
     activate_rx: &async_channel::Receiver<ActivateReq>,
     menu_click_rx: &async_channel::Receiver<tray_menu::MenuClickReq>,
-) -> anyhow::Result<()> {
+) -> Result<()> {
     let conn = zbus::Connection::session().await?;
 
     // Start our Watcher — returns a channel for item registrations
@@ -530,7 +542,7 @@ async fn run_sni_session(
     let host_wellknown: zbus::names::WellKnownName = host_name
         .as_str()
         .try_into()
-        .map_err(|e| anyhow::anyhow!("invalid host name: {e}"))?;
+        .map_err(|e: zbus::names::Error| TrayError::InvalidName(e.to_string()))?;
     conn.request_name(&host_wellknown).await?;
     watcher.register_status_notifier_host(&host_name).await?;
     tracing::info!("tray: registered as SNI host");

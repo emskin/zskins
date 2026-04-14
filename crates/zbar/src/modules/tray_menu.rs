@@ -6,6 +6,16 @@ use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 use zbus::zvariant::{OwnedValue, Structure, Value};
 
+#[derive(Debug, thiserror::Error)]
+pub enum TrayMenuError {
+    #[error("dbus: {0}")]
+    Dbus(#[from] zbus::Error),
+    #[error("parse menu item: {0}")]
+    Parse(String),
+}
+
+type Result<T> = std::result::Result<T, TrayMenuError>;
+
 // ---------------------------------------------------------------------------
 // DBusMenu proxy
 // ---------------------------------------------------------------------------
@@ -93,10 +103,10 @@ fn strip_mnemonics(s: &str) -> String {
     out
 }
 
-fn parse_menu_item(value: &OwnedValue) -> anyhow::Result<MenuItem> {
+fn parse_menu_item(value: &OwnedValue) -> Result<MenuItem> {
     let structure = value
         .downcast_ref::<&Structure>()
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+        .map_err(|e| TrayMenuError::Parse(e.to_string()))?;
     let fields = structure.fields();
 
     let id = fields
@@ -161,7 +171,7 @@ pub async fn fetch_menu(
     conn: &zbus::Connection,
     addr: &str,
     menu_path: &str,
-) -> anyhow::Result<Vec<MenuItem>> {
+) -> Result<Vec<MenuItem>> {
     let (destination, _) = super::tray::parse_address(addr);
     let proxy = DBusMenuProxy::builder(conn)
         .destination(destination.to_string())?
@@ -180,7 +190,7 @@ pub async fn activate_menu_item(
     addr: &str,
     menu_path: &str,
     item_id: i32,
-) -> anyhow::Result<()> {
+) -> Result<()> {
     let (destination, _) = super::tray::parse_address(addr);
     let proxy = DBusMenuProxy::builder(conn)
         .destination(destination.to_string())?
