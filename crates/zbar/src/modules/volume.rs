@@ -4,6 +4,14 @@ use std::io::BufRead;
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 
+#[derive(Debug, thiserror::Error)]
+enum VolumeError {
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("pactl subscribe exited")]
+    PactlExited,
+}
+
 pub struct VolumeModule {
     percent: Option<u32>,
     muted: bool,
@@ -56,7 +64,7 @@ fn run_pactl_subscribe(tx: async_channel::Sender<(Option<u32>, bool)>) {
     }
 }
 
-fn run_pactl_session(tx: &async_channel::Sender<(Option<u32>, bool)>) -> anyhow::Result<()> {
+fn run_pactl_session(tx: &async_channel::Sender<(Option<u32>, bool)>) -> Result<(), VolumeError> {
     let mut child = Command::new("pactl")
         .arg("subscribe")
         .stdout(Stdio::piped())
@@ -76,7 +84,7 @@ fn run_pactl_session(tx: &async_channel::Sender<(Option<u32>, bool)>) -> anyhow:
             let _ = tx.try_send(read_volume());
         }
     }
-    anyhow::bail!("pactl subscribe exited")
+    Err(VolumeError::PactlExited)
 }
 
 static HAS_WPCTL: OnceLock<bool> = OnceLock::new();
