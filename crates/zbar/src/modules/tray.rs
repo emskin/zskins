@@ -233,15 +233,23 @@ const WATCHER_BUS: &str = "org.kde.StatusNotifierWatcher";
 const WATCHER_OBJECT: &str = "/StatusNotifierWatcher";
 const ITEM_OBJECT: &str = "/StatusNotifierItem";
 
-#[allow(dead_code)] // ItemRemoved will be used when disconnect detection is added.
 enum WatcherEvent {
     ItemAdded(String),
     ItemRemoved(String),
 }
 
+/// Shared mutable state between the D-Bus interface handler and the
+/// NameOwnerChanged cleanup task. Maps each registered service name
+/// to the unique bus name (e.g. `:1.123`) of its owner so we can
+/// detect owner-loss when a tray app crashes without unregistering.
+#[derive(Default)]
+struct WatcherState {
+    items: std::sync::Mutex<std::collections::HashMap<String, String>>,
+    hosts: std::sync::Mutex<std::collections::HashMap<String, String>>,
+}
+
 struct SniWatcher {
-    items: std::sync::Mutex<std::collections::HashSet<String>>,
-    hosts: std::sync::Mutex<std::collections::HashSet<String>>,
+    state: Arc<WatcherState>,
     /// Notify the host directly when items are added/removed
     /// (D-Bus doesn't loop back signals to the same connection).
     event_tx: async_channel::Sender<WatcherEvent>,
@@ -256,8 +264,9 @@ impl SniWatcher {
         #[zbus(signal_emitter)] emitter: zbus::object_server::SignalEmitter<'_>,
     ) {
         let name = resolve_sender(service, &hdr);
-        tracing::debug!("watcher: host registered: {name}");
-        self.hosts.lock().unwrap().insert(name);
+        let owner = hdr.sender().map(|s| s.to_string()).unwrap_or_default();
+        tracing::debug!("watcher: host registered: {name} owner={owner}");
+        self.state.hosts.lock().unwrap().insert(name, owner);
         let _ = Self::status_notifier_host_registered(&emitter).await;
     }
 
@@ -273,8 +282,9 @@ impl SniWatcher {
         } else {
             format!("{name}{ITEM_OBJECT}")
         };
-        tracing::info!("watcher: item registered: {item}");
-        self.items.lock().unwrap().insert(item.clone());
+        let owner = hdr.sender().map(|s| s.to_string()).unwrap_or_default();
+        tracing::info!("watcher: item registered: {item} owner={owner}");
+        self.state.items.lock().unwrap().insert(item.clone(), owner);
         let _ = self
             .event_tx
             .try_send(WatcherEvent::ItemAdded(item.clone()));
@@ -300,12 +310,12 @@ impl SniWatcher {
 
     #[zbus(property)]
     fn is_status_notifier_host_registered(&self) -> bool {
-        !self.hosts.lock().unwrap().is_empty()
+        !self.state.hosts.lock().unwrap().is_empty()
     }
 
     #[zbus(property)]
     fn registered_status_notifier_items(&self) -> Vec<String> {
-        self.items.lock().unwrap().iter().cloned().collect()
+        self.state.items.lock().unwrap().keys().cloned().collect()
     }
 
     #[zbus(property)]
@@ -323,14 +333,18 @@ fn resolve_sender(service: &str, hdr: &zbus::message::Header<'_>) -> String {
     service.to_string()
 }
 
-async fn start_watcher(
-    conn: &zbus::Connection,
-) -> anyhow::Result<async_channel::Receiver<WatcherEvent>> {
+struct WatcherHandle {
+    event_rx: async_channel::Receiver<WatcherEvent>,
+    state: Arc<WatcherState>,
+    event_tx: async_channel::Sender<WatcherEvent>,
+}
+
+async fn start_watcher(conn: &zbus::Connection) -> anyhow::Result<WatcherHandle> {
     let (event_tx, event_rx) = async_channel::bounded(32);
+    let state: Arc<WatcherState> = Arc::new(WatcherState::default());
     let watcher = SniWatcher {
-        items: Default::default(),
-        hosts: Default::default(),
-        event_tx,
+        state: state.clone(),
+        event_tx: event_tx.clone(),
     };
     conn.object_server().at(WATCHER_OBJECT, watcher).await?;
 
@@ -341,7 +355,89 @@ async fn start_watcher(
         Err(e) => return Err(e.into()),
     }
     tracing::info!("tray: StatusNotifierWatcher started");
-    Ok(event_rx)
+    Ok(WatcherHandle {
+        event_rx,
+        state,
+        event_tx,
+    })
+}
+
+/// Subscribe to `org.freedesktop.DBus.NameOwnerChanged` and clean up any
+/// registered items/hosts whose owner disappears without an explicit
+/// Unregister call (i.e. the tray app crashed or was killed).
+async fn watch_name_owner_changed(
+    conn: zbus::Connection,
+    state: Arc<WatcherState>,
+    event_tx: async_channel::Sender<WatcherEvent>,
+) -> anyhow::Result<()> {
+    use futures_lite::StreamExt;
+
+    let dbus = zbus::fdo::DBusProxy::new(&conn).await?;
+    let mut stream = dbus.receive_name_owner_changed().await?;
+    tracing::debug!("watcher: NameOwnerChanged subscription active");
+
+    while let Some(sig) = stream.next().await {
+        let args = match sig.args() {
+            Ok(a) => a,
+            Err(_) => continue,
+        };
+        // Only fire on owner-lost transitions (new_owner empty).
+        let has_new_owner = args
+            .new_owner
+            .as_ref()
+            .is_some_and(|n| !n.as_str().is_empty());
+        if has_new_owner {
+            continue;
+        }
+        let lost = match args.old_owner.as_ref() {
+            Some(n) if !n.as_str().is_empty() => n.to_string(),
+            _ => continue,
+        };
+
+        // Remove any items whose owner matches the lost unique name.
+        let removed_items: Vec<String> = {
+            let mut items = state.items.lock().unwrap();
+            let keys: Vec<String> = items
+                .iter()
+                .filter(|(_, v)| *v == &lost)
+                .map(|(k, _)| k.clone())
+                .collect();
+            for k in &keys {
+                items.remove(k);
+            }
+            keys
+        };
+        for item in removed_items {
+            tracing::info!("watcher: item owner lost, removing: {item}");
+            let _ = event_tx.try_send(WatcherEvent::ItemRemoved(item.clone()));
+            // Emit the spec-defined signal so any other hosts observe the
+            // cleanup too.
+            if let Ok(iface_ref) = conn
+                .object_server()
+                .interface::<_, SniWatcher>(WATCHER_OBJECT)
+                .await
+            {
+                let _ = SniWatcher::status_notifier_item_unregistered(
+                    iface_ref.signal_emitter(),
+                    &item,
+                )
+                .await;
+            }
+        }
+
+        // Hosts cleanup — simply drop entries owned by the lost name.
+        {
+            let mut hosts = state.hosts.lock().unwrap();
+            let before = hosts.len();
+            hosts.retain(|_, owner| owner != &lost);
+            let dropped = before - hosts.len();
+            if dropped > 0 {
+                tracing::debug!("watcher: dropped {dropped} host(s) for lost owner {lost}");
+            }
+        }
+    }
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -376,7 +472,26 @@ async fn run_sni_session(
     // Start our Watcher — returns a channel for item registrations
     // (D-Bus doesn't loop signals back to the same connection).
     let watcher_event_rx = match start_watcher(&conn).await {
-        Ok(rx) => Some(rx),
+        Ok(handle) => {
+            // Spawn the owner-lost cleanup task. Runs for the lifetime
+            // of this session (ex.tick() below drives it).
+            let cleanup_conn = conn.clone();
+            let cleanup_state = handle.state.clone();
+            let cleanup_tx = handle.event_tx.clone();
+            std::thread::Builder::new()
+                .name("tray-sni-cleanup".into())
+                .spawn(move || {
+                    async_io::block_on(async move {
+                        if let Err(e) =
+                            watch_name_owner_changed(cleanup_conn, cleanup_state, cleanup_tx).await
+                        {
+                            tracing::warn!("tray: NameOwnerChanged watcher ended: {e}");
+                        }
+                    });
+                })
+                .expect("spawn tray cleanup thread");
+            Some(handle.event_rx)
+        }
         Err(e) => {
             tracing::debug!("tray: watcher start skipped: {e}");
             None
