@@ -26,6 +26,7 @@ nix = { version = "0.29", features = ["fs", "signal", "process", "poll"] }
 gtk4 = "0.9"
 unicode-segmentation = "1"
 rayon = "1"
+icon-theme = { path = "crates/icon-theme" }
 walkdir = "2"
 include_dir = "0.7"
 syntect = { version = "5", default-features = false, features = ["default-fancy"] }
