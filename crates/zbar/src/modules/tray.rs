@@ -289,6 +289,33 @@ const WATCHER_BUS: &str = "org.kde.StatusNotifierWatcher";
 const WATCHER_OBJECT: &str = "/StatusNotifierWatcher";
 const ITEM_OBJECT: &str = "/StatusNotifierItem";
 
+/// Interface names to try when reading StatusNotifierItem properties.
+/// Different toolkits publish items under different vendor prefixes — we
+/// try KDE first (most common), then the freedesktop draft, then Ayatana.
+const SNI_INTERFACES: [&str; 3] = [
+    "org.kde.StatusNotifierItem",
+    "org.freedesktop.StatusNotifierItem",
+    "org.ayatana.StatusNotifierItem",
+];
+
+/// Fetch one SNI property, trying each known interface name in order.
+/// Returns the first value that both reads successfully and converts to `T`.
+async fn get_sni_prop<T>(props: &zbus::fdo::PropertiesProxy<'_>, name: &str) -> Option<T>
+where
+    T: TryFrom<zbus::zvariant::OwnedValue>,
+{
+    for iface_str in &SNI_INTERFACES {
+        let iface = zbus::names::InterfaceName::from_static_str_unchecked(iface_str);
+        let Ok(val) = props.get(iface, name).await else {
+            continue;
+        };
+        if let Ok(out) = T::try_from(val) {
+            return Some(out);
+        }
+    }
+    None
+}
+
 enum WatcherEvent {
     ItemAdded(String),
     ItemRemoved(String),
@@ -723,6 +750,14 @@ async fn handle_activate(
 #[derive(Clone)]
 struct TrayItemMeta {
     menu_path: Option<String>,
+    /// Cached `IconThemePath` property — per the SNI spec this is a
+    /// per-item hint that does not change over an item's lifetime, so we
+    /// fetch it once at registration and reuse on every NewIcon signal
+    /// instead of re-issuing a D-Bus round trip each time. Read through
+    /// a clone captured by the NewIcon watcher task, so the field itself
+    /// looks unused to the dead-code analyser.
+    #[allow(dead_code)]
+    icon_theme_path: Option<String>,
 }
 
 async fn add_item(
@@ -732,6 +767,10 @@ async fn add_item(
     tx: &async_channel::Sender<TrayMsg>,
     ex: &async_executor::LocalExecutor<'_>,
 ) -> TrayItemMeta {
+    let empty = TrayItemMeta {
+        menu_path: None,
+        icon_theme_path: None,
+    };
     let (destination, path) = parse_address(addr);
     let proxy = match StatusNotifierItemProxy::builder(conn)
         .destination(destination.to_string())
@@ -741,16 +780,19 @@ async fn add_item(
             Ok(p) => p,
             Err(e) => {
                 tracing::warn!("tray: failed to build proxy for {addr}: {e}");
-                return TrayItemMeta { menu_path: None };
+                return empty;
             }
         },
         Err(e) => {
             tracing::warn!("tray: invalid address {addr}: {e}");
-            return TrayItemMeta { menu_path: None };
+            return empty;
         }
     };
 
-    let icon = fetch_icon(&proxy, icon_cache).await;
+    // IconThemePath is immutable per-item, so fetch once up-front and reuse
+    // on every subsequent NewIcon signal instead of paying for a round trip.
+    let icon_theme_path = fetch_icon_theme_path(&proxy).await;
+    let icon = fetch_icon(&proxy, icon_cache, icon_theme_path.as_deref()).await;
     let status = proxy
         .status()
         .await
@@ -780,6 +822,7 @@ async fn add_item(
         let addr = addr.to_string();
         let icon_cache = icon_cache.clone();
         let proxy_inner = proxy.inner().clone();
+        let cached_theme_path = icon_theme_path.clone();
         ex.spawn(async move {
             use futures_lite::StreamExt;
             let proxy = StatusNotifierItemProxy::from(proxy_inner);
@@ -790,7 +833,7 @@ async fn add_item(
             tracing::debug!("tray: watching NewIcon for {addr}");
             while stream.next().await.is_some() {
                 tracing::debug!("tray: NewIcon signal for {addr}");
-                let icon = fetch_icon(&proxy, &icon_cache).await;
+                let icon = fetch_icon(&proxy, &icon_cache, cached_theme_path.as_deref()).await;
                 if tx
                     .send(TrayMsg::UpdateIcon(addr.clone(), icon))
                     .await
@@ -855,7 +898,28 @@ async fn add_item(
         .detach();
     }
 
-    TrayItemMeta { menu_path }
+    TrayItemMeta {
+        menu_path,
+        icon_theme_path,
+    }
+}
+
+/// Fetch the `IconThemePath` property once — it is immutable per the SNI
+/// spec, so the result can be cached on the `TrayItemMeta` and reused on
+/// every NewIcon signal instead of re-issuing a D-Bus round trip.
+async fn fetch_icon_theme_path(proxy: &StatusNotifierItemProxy<'_>) -> Option<String> {
+    let dest = proxy.inner().destination().to_string();
+    let path = proxy.inner().path().to_string();
+    let props = zbus::fdo::PropertiesProxy::builder(proxy.inner().connection())
+        .destination(dest.as_str())
+        .and_then(|b| b.path(path.as_str()))
+        .ok()?
+        .build()
+        .await
+        .ok()?;
+    get_sni_prop::<String>(&props, "IconThemePath")
+        .await
+        .filter(|s| !s.is_empty())
 }
 
 /// Fetch the SNI `ToolTip` property via Properties.Get, trying each
@@ -874,28 +938,13 @@ async fn fetch_tooltip(proxy: &StatusNotifierItemProxy<'_>) -> Option<Tooltip> {
         Err(_) => return None,
     };
 
-    let ifaces = [
-        "org.kde.StatusNotifierItem",
-        "org.freedesktop.StatusNotifierItem",
-        "org.ayatana.StatusNotifierItem",
-    ];
-
-    for iface_str in &ifaces {
-        let iface = zbus::names::InterfaceName::from_static_str_unchecked(iface_str);
-        let Ok(val) = props.get(iface, "ToolTip").await else {
-            continue;
-        };
-        // Unwrap one level: Properties.Get returns Value::Value(inner).
-        let inner: Value<'_> = val.into();
-        let structure = match inner {
-            Value::Structure(s) => s,
-            _ => continue,
-        };
-        if let Some(t) = tooltip_from_structure(&structure) {
-            return Some(t);
-        }
-    }
-    None
+    let val = get_sni_prop::<zbus::zvariant::OwnedValue>(&props, "ToolTip").await?;
+    // Unwrap one level: Properties.Get returns Value::Value(inner).
+    let inner: Value<'_> = val.into();
+    let Value::Structure(structure) = inner else {
+        return None;
+    };
+    tooltip_from_structure(&structure)
 }
 
 fn tooltip_from_structure(s: &zbus::zvariant::Structure<'_>) -> Option<Tooltip> {
@@ -924,9 +973,14 @@ fn field_as_string(v: &zbus::zvariant::Value<'_>) -> Option<String> {
 
 /// Fetch the current icon, bypassing zbus property cache by using
 /// Properties.Get directly (NewIcon signal arrives before PropertiesChanged).
+///
+/// `theme_path` is the cached `IconThemePath` for this item (immutable for
+/// the lifetime of a tray item), so we don't re-fetch it on every NewIcon
+/// signal.
 async fn fetch_icon(
     proxy: &StatusNotifierItemProxy<'_>,
     icon_cache: &icon_theme::IconCache,
+    theme_path: Option<&str>,
 ) -> Option<TrayIcon> {
     let dest = proxy.inner().destination().to_string();
     let path = proxy.inner().path().to_string();
@@ -949,84 +1003,50 @@ async fn fetch_icon(
         }
     };
 
-    // Try multiple interface names — KDE, freedesktop, and Ayatana.
-    let ifaces = [
-        "org.kde.StatusNotifierItem",
-        "org.freedesktop.StatusNotifierItem",
-        "org.ayatana.StatusNotifierItem",
-    ];
+    let pixmap_result = get_sni_prop::<Vec<(i32, i32, Vec<u8>)>>(&props, "IconPixmap")
+        .await
+        .and_then(|pixmaps| {
+            tracing::debug!("tray: IconPixmap returned {} entries", pixmaps.len());
+            best_pixmap_from_tuples(&pixmaps)
+        });
+    let icon_name = get_sni_prop::<String>(&props, "IconName")
+        .await
+        .unwrap_or_default();
 
-    let mut pixmap_result = None;
-    let mut icon_name = String::new();
+    resolve_icon(pixmap_result, &icon_name, theme_path, icon_cache)
+}
 
-    for iface_str in &ifaces {
-        let iface = zbus::names::InterfaceName::from_static_str_unchecked(iface_str);
-
-        if pixmap_result.is_none() {
-            match props.get(iface.clone(), "IconPixmap").await {
-                Ok(val) => {
-                    if let Ok(pixmaps) = <Vec<(i32, i32, Vec<u8>)>>::try_from(val) {
-                        tracing::debug!(
-                            "tray: IconPixmap returned {} entries via {iface_str}",
-                            pixmaps.len()
-                        );
-                        pixmap_result = best_pixmap_from_tuples(&pixmaps);
-                    }
-                }
-                Err(e) => tracing::debug!("tray: IconPixmap via {iface_str}: {e}"),
-            }
-        }
-
-        if icon_name.is_empty() {
-            match props.get(iface, "IconName").await {
-                Ok(val) => match String::try_from(val) {
-                    Ok(s) if !s.is_empty() => icon_name = s,
-                    _ => {}
-                },
-                Err(e) => tracing::debug!("tray: IconName via {iface_str}: {e}"),
-            }
-        }
-
-        if pixmap_result.is_some() || !icon_name.is_empty() {
-            break;
-        }
-    }
-
+/// Resolve the best icon source from already-fetched properties. Extracted
+/// so the batch-fetch path in `add_item` can reuse icon selection logic
+/// without paying for a second round trip.
+fn resolve_icon(
+    pixmap_result: Option<Arc<RenderImage>>,
+    icon_name: &str,
+    theme_path: Option<&str>,
+    icon_cache: &icon_theme::IconCache,
+) -> Option<TrayIcon> {
     if let Some(img) = pixmap_result {
         return Some(TrayIcon::Pixmap(img));
     }
 
-    let name = icon_name;
-    if name.is_empty() {
+    if icon_name.is_empty() {
         tracing::debug!("tray: no icon available");
         return None;
     }
 
-    tracing::debug!("tray: icon_name={name}");
-    if name.starts_with('/') {
-        return load_icon_file(std::path::Path::new(&name));
+    tracing::debug!("tray: icon_name={icon_name}");
+    if icon_name.starts_with('/') {
+        return load_icon_file(std::path::Path::new(icon_name));
     }
 
     // Check app-specific IconThemePath first.
-    let mut theme_path = String::new();
-    for iface_str in &ifaces {
-        let iface = zbus::names::InterfaceName::from_static_str_unchecked(iface_str);
-        if let Ok(val) = props.get(iface, "IconThemePath").await {
-            if let Ok(s) = String::try_from(val) {
-                if !s.is_empty() {
-                    theme_path = s;
-                    break;
-                }
-            }
-        }
-    }
-    if !theme_path.is_empty() {
-        let dir = std::path::Path::new(&theme_path);
+    if let Some(theme_path) = theme_path.filter(|s| !s.is_empty()) {
+        let dir = std::path::Path::new(theme_path);
         for ext in &["svg", "svgz", "png"] {
-            let candidate = dir.join(format!("{name}.{ext}"));
+            let candidate = dir.join(format!("{icon_name}.{ext}"));
             if candidate.exists() {
                 tracing::debug!(
-                    "tray: icon_name={name} via theme_path: {}",
+                    "tray: icon_name={icon_name} via theme_path: {}",
                     candidate.display()
                 );
                 return load_icon_file(&candidate);
@@ -1034,9 +1054,9 @@ async fn fetch_icon(
         }
         // Also check subdirectories (e.g. hicolor/48x48/status/)
         if dir.is_dir() {
-            if let Some(icon) = find_icon_recursive(dir, &name, 3) {
+            if let Some(icon) = find_icon_recursive(dir, icon_name, 3) {
                 tracing::debug!(
-                    "tray: icon_name={name} via theme_path subdir: {}",
+                    "tray: icon_name={icon_name} via theme_path subdir: {}",
                     icon.display()
                 );
                 return load_icon_file(&icon);
@@ -1044,9 +1064,9 @@ async fn fetch_icon(
         }
     }
 
-    let path = icon_cache.lookup(&name)?;
+    let path = icon_cache.lookup(icon_name)?;
     tracing::debug!(
-        "tray: icon_name={name} via system theme: {}",
+        "tray: icon_name={icon_name} via system theme: {}",
         path.display()
     );
     load_icon_file(path)
