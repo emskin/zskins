@@ -879,16 +879,30 @@ fn render_argb_pixmap(w: u32, h: u32, pixels: &[u8]) -> Option<Arc<RenderImage>>
         return None;
     }
 
-    // SNI spec: ARGB32 network byte order → [A, R, G, B] per pixel.
-    // image::RgbaImage expects [R, G, B, A].
-    let mut rgba = Vec::with_capacity(pixels.len());
-    for chunk in pixels.chunks_exact(4) {
-        rgba.extend_from_slice(&[chunk[1], chunk[2], chunk[3], chunk[0]]);
-    }
+    // SNI spec: IconPixmap is ARGB32 in network byte order (big-endian).
+    // On little-endian hosts the in-memory byte layout per pixel is
+    // `[A, R, G, B]` (i.e. src[0]=A, src[1]=R, src[2]=G, src[3]=B).
+    //
+    // GPUI's `RenderImage` expects BGRA byte order (see `load_icon_file`'s
+    // R<->B swap for ICO), so we remap to `[B, G, R, A]`:
+    //   dst[0]=B=src[3], dst[1]=G=src[2], dst[2]=R=src[1], dst[3]=A=src[0].
+    let bgra = argb_be_to_bgra(pixels);
 
-    let buf = image::RgbaImage::from_raw(w, h, rgba)?;
+    // `image::RgbaImage` only validates buffer size; the channel order is
+    // whatever we put in. We store BGRA bytes for GPUI's renderer.
+    let buf = image::RgbaImage::from_raw(w, h, bgra)?;
     let frame = image::Frame::new(buf);
     Some(Arc::new(RenderImage::new(vec![frame])))
+}
+
+/// Convert big-endian ARGB32 bytes (`[A, R, G, B]` per pixel) into BGRA
+/// bytes (`[B, G, R, A]` per pixel) as required by GPUI's `RenderImage`.
+fn argb_be_to_bgra(pixels: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(pixels.len());
+    for chunk in pixels.chunks_exact(4) {
+        out.extend_from_slice(&[chunk[3], chunk[2], chunk[1], chunk[0]]);
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -949,5 +963,51 @@ impl Render for TrayModule {
         }
 
         row
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::argb_be_to_bgra;
+
+    #[test]
+    fn argb_be_to_bgra_maps_single_pixel() {
+        // SNI big-endian ARGB32 byte layout: [A, R, G, B].
+        // Pixel: A=0x12, R=0x34, G=0x56, B=0x78
+        let src = [0x12, 0x34, 0x56, 0x78];
+        // Expected BGRA: [B, G, R, A] = [0x78, 0x56, 0x34, 0x12]
+        let dst = argb_be_to_bgra(&src);
+        assert_eq!(dst, vec![0x78, 0x56, 0x34, 0x12]);
+    }
+
+    #[test]
+    fn argb_be_to_bgra_maps_multiple_pixels() {
+        // Two pixels: opaque red, then half-transparent green.
+        let src = [
+            0xFF, 0xFF, 0x00, 0x00, // A=FF, R=FF, G=00, B=00  (opaque red)
+            0x80, 0x00, 0xFF, 0x00, // A=80, R=00, G=FF, B=00  (half green)
+        ];
+        let dst = argb_be_to_bgra(&src);
+        assert_eq!(
+            dst,
+            vec![
+                0x00, 0x00, 0xFF, 0xFF, // B=00, G=00, R=FF, A=FF
+                0x00, 0xFF, 0x00, 0x80, // B=00, G=FF, R=00, A=80
+            ]
+        );
+    }
+
+    #[test]
+    fn argb_be_to_bgra_preserves_length() {
+        let src = vec![0u8; 16];
+        assert_eq!(argb_be_to_bgra(&src).len(), 16);
+    }
+
+    #[test]
+    fn argb_be_to_bgra_ignores_trailing_partial_pixel() {
+        // chunks_exact drops any trailing bytes that don't form a full pixel.
+        let src = [0x12, 0x34, 0x56, 0x78, 0xAA, 0xBB];
+        let dst = argb_be_to_bgra(&src);
+        assert_eq!(dst, vec![0x78, 0x56, 0x34, 0x12]);
     }
 }
