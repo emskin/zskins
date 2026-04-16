@@ -814,11 +814,21 @@ impl Launcher {
                 .px(px(20.0))
                 .py(px(16.0))
                 .child(
-                    img(image)
-                        .max_w_full()
-                        .max_h_full()
-                        .object_fit(ObjectFit::Contain)
-                        .rounded(px(4.0)),
+                    // Image surface: border + slight inset shadow so the
+                    // letterbox area (when image aspect ≠ pane aspect) reads
+                    // as "frame around a distinct surface" rather than
+                    // "image floating in empty space".
+                    div()
+                        .rounded(px(6.0))
+                        .border_1()
+                        .border_color(theme::panel_border())
+                        .overflow_hidden()
+                        .child(
+                            img(image)
+                                .max_w_full()
+                                .max_h_full()
+                                .object_fit(ObjectFit::Contain),
+                        ),
                 )
                 .into_any_element(),
             None => body_container

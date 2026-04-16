@@ -26,7 +26,7 @@ use std::time::Duration;
 
 use gpui::{div, prelude::*, AnyElement, FontWeight, Image, ImageFormat, ObjectFit};
 
-use crate::source::{ActivateOutcome, Layout, Preview, PreviewChrome, PreviewPill, Source};
+use crate::source::{ActivateOutcome, Layout, Preview, PreviewChrome, Source};
 use crate::sources::icon as shared_icon;
 use crate::theme;
 use crate::usage::UsageTracker;
@@ -604,20 +604,16 @@ impl Source for WindowsSource {
     fn preview_chrome(&self, ix: usize) -> Option<PreviewChrome> {
         let items = self.items.read().unwrap();
         let row = items.get(ix)?;
-        let mut pills = Vec::new();
-        if row.activated {
-            pills.push(PreviewPill {
-                text: "active".into(),
-                active: true,
-            });
-        }
+        // No pills: `activated` is false for every row while zofi holds focus,
+        // so the pill would always be absent in practice. Metadata strip
+        // below carries the durable facts (app_id + window id).
         let metadata = vec![
             ("App".into(), row.app_id.clone()),
             ("ID".into(), format!("0x{:x}", row.id)),
         ];
         Some(PreviewChrome {
             title: row.display_label.clone(),
-            pills,
+            pills: Vec::new(),
             metadata,
         })
     }

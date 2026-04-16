@@ -127,10 +127,10 @@ pub fn pill_active_bg() -> Hsla {
 /// visually broken — just un-tinted until they get a palette entry.
 pub fn category(name: &str) -> Hsla {
     match name {
-        "windows" => rgb(0x8fb8d6).into(),
-        "apps" => rgb(0xd9b37a).into(),
-        "files" => rgb(0x8fc79a).into(),
-        "clipboard" => rgb(0xb5a3d9).into(),
+        "windows" => rgb(0x5fa8e8).into(),
+        "apps" => rgb(0xf0a84d).into(),
+        "files" => rgb(0x5fcd85).into(),
+        "clipboard" => rgb(0xc088f5).into(),
         _ => accent(),
     }
 }
