@@ -44,13 +44,13 @@ pub trait CompositorIpc: Send + Sync {
 /// compositor detected".
 pub fn detect() -> Box<dyn CompositorIpc> {
     if std::env::var("SWAYSOCK").is_ok() || std::env::var("I3SOCK").is_ok() {
-        tracing::info!("compositor::detect chose sway");
+        tracing::debug!("compositor::detect chose sway");
         return Box::new(SwayIpc);
     }
     if std::env::var("HYPRLAND_INSTANCE_SIGNATURE").is_ok() {
-        tracing::info!("compositor::detect chose hyprland");
+        tracing::debug!("compositor::detect chose hyprland");
         return Box::new(HyprlandIpc);
     }
-    tracing::info!("compositor::detect chose noop (no known compositor env)");
+    tracing::debug!("compositor::detect chose noop (no known compositor env)");
     Box::new(NoopIpc)
 }

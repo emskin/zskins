@@ -30,7 +30,8 @@ impl CompositorIpc for HyprlandIpc {
 fn open_socket(his: &str) -> std::io::Result<UnixStream> {
     // Try the modern XDG path first; fall back to the legacy /tmp location
     // for older Hyprland builds. The first one that connects wins.
-    let candidates = candidate_paths(his);
+    let xdg = std::env::var("XDG_RUNTIME_DIR").ok();
+    let candidates = candidate_paths(xdg.as_deref(), his);
     let mut last_err = None;
     for path in candidates {
         match UnixStream::connect(&path) {
@@ -46,10 +47,19 @@ fn open_socket(his: &str) -> std::io::Result<UnixStream> {
     Err(last_err.unwrap_or_else(|| std::io::Error::other("no hyprland socket candidates")))
 }
 
-fn candidate_paths(his: &str) -> Vec<PathBuf> {
+/// Path candidates for the Hyprland IPC socket. `xdg_runtime_dir` is
+/// taken as a parameter rather than read from the environment so tests
+/// can exercise the precedence logic without touching `std::env::set_var`
+/// (unsound under Rust's threading model — see CLAUDE.md).
+fn candidate_paths(xdg_runtime_dir: Option<&str>, his: &str) -> Vec<PathBuf> {
     let mut out = Vec::with_capacity(2);
-    if let Ok(xdg) = std::env::var("XDG_RUNTIME_DIR") {
-        out.push(PathBuf::from(xdg).join("hypr").join(his).join(".socket.sock"));
+    if let Some(xdg) = xdg_runtime_dir {
+        out.push(
+            PathBuf::from(xdg)
+                .join("hypr")
+                .join(his)
+                .join(".socket.sock"),
+        );
     }
     out.push(PathBuf::from("/tmp/hypr").join(his).join(".socket.sock"));
     out
@@ -118,15 +128,18 @@ mod tests {
 
     #[test]
     fn xdg_runtime_dir_path_takes_precedence() {
-        // Save and restore XDG_RUNTIME_DIR so the test stays hermetic.
-        let prev = std::env::var("XDG_RUNTIME_DIR").ok();
-        std::env::set_var("XDG_RUNTIME_DIR", "/run/user/1000");
-        let paths = candidate_paths("HIS-FAKE");
-        assert_eq!(paths[0], PathBuf::from("/run/user/1000/hypr/HIS-FAKE/.socket.sock"));
+        let paths = candidate_paths(Some("/run/user/1000"), "HIS-FAKE");
+        assert_eq!(
+            paths[0],
+            PathBuf::from("/run/user/1000/hypr/HIS-FAKE/.socket.sock")
+        );
         assert_eq!(paths[1], PathBuf::from("/tmp/hypr/HIS-FAKE/.socket.sock"));
-        match prev {
-            Some(v) => std::env::set_var("XDG_RUNTIME_DIR", v),
-            None => std::env::remove_var("XDG_RUNTIME_DIR"),
-        }
+    }
+
+    #[test]
+    fn missing_xdg_runtime_dir_falls_back_to_tmp_only() {
+        let paths = candidate_paths(None, "HIS-FAKE");
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0], PathBuf::from("/tmp/hypr/HIS-FAKE/.socket.sock"));
     }
 }
