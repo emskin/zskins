@@ -1054,12 +1054,11 @@ fn capitalize(s: &str) -> String {
     }
 }
 
-/// Short label for prefix-hint chips next to the search input. Only
-/// "windows" and "clipboard" need shortening; everything else already
-/// fits in the tight chip layout.
+/// Short label for prefix-hint chips next to the search input. Keeps
+/// "windows"/"files" full (short enough) and trims "clipboard" to "clip"
+/// so it doesn't dominate the row.
 fn shorten_source_name(name: &str) -> String {
     match name {
-        "windows" => "win".into(),
         "clipboard" => "clip".into(),
         other => other.to_string(),
     }
@@ -1395,14 +1394,28 @@ fn render_pill(p: &PreviewPill) -> gpui::Div {
     } else {
         (theme::fg_dim(), theme::kbd_bg())
     };
-    div()
+    let mut row = div()
+        .flex()
+        .items_center()
+        .gap(px(5.0))
         .px(px(8.0))
         .py(px(3.0))
         .rounded(px(999.0))
         .bg(bg)
         .text_color(fg)
-        .text_size(px(11.0))
-        .child(p.text.clone())
+        .text_size(px(11.0));
+    if p.active {
+        // Solid green dot to read as "live indicator", matching the
+        // status-led convention from the mockup.
+        row = row.child(
+            div()
+                .w(px(6.0))
+                .h(px(6.0))
+                .rounded(px(999.0))
+                .bg(theme::pill_active_fg()),
+        );
+    }
+    row.child(p.text.clone())
 }
 
 /// Bottom metadata strip: `(label, value)` pairs in a dim monospaced row.

@@ -21,12 +21,13 @@
 //! a compositor.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use gpui::{div, prelude::*, AnyElement, FontWeight, Image, ImageFormat, ObjectFit};
 
-use crate::source::{ActivateOutcome, Layout, Preview, PreviewChrome, Source};
+use crate::source::{ActivateOutcome, Layout, Preview, PreviewChrome, PreviewPill, Source};
 use crate::sources::icon as shared_icon;
 use crate::theme;
 use crate::usage::UsageTracker;
@@ -128,6 +129,12 @@ pub struct WindowsSource {
     /// peek mode (1:1 overlay) and Ctrl+C image copy. Separate from `thumbs`
     /// so the preview pane keeps its aliasing-free pre-shrunk render.
     full_thumbs: ThumbnailMap,
+    /// Id of the most recently-activated window. Updated on every event
+    /// that reports `activated=true`, never cleared. Zofi itself steals
+    /// focus on launch so `row.activated` becomes false everywhere;
+    /// this sticky pointer lets the preview pane still mark the window
+    /// the user would return to by pressing esc. Sentinel `0` = none.
+    last_active: Arc<AtomicU64>,
 }
 
 impl WindowsSource {
@@ -157,10 +164,12 @@ impl WindowsSource {
         let (pulse_tx, pulse_rx) = async_channel::bounded::<()>(1);
         let memo: IconMemo = Arc::new(Mutex::new(HashMap::new()));
 
+        let last_active: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
         let items_for_thread = items.clone();
         let events = client.events.clone();
         let resolver_for_thread = resolver.clone();
         let memo_for_thread = memo.clone();
+        let last_active_for_thread = last_active.clone();
         std::thread::Builder::new()
             .name("zofi-windows".into())
             .spawn(move || {
@@ -172,6 +181,7 @@ impl WindowsSource {
                         ev,
                         resolver_for_thread.as_ref(),
                         &memo_for_thread,
+                        &last_active_for_thread,
                     );
                     // `try_send` coalesces: if the receiver hasn't drained
                     // yet, drop the extra tick. One pulse per frame is enough.
@@ -263,6 +273,7 @@ impl WindowsSource {
             tracker: None,
             thumbs,
             full_thumbs,
+            last_active,
         }
     }
 
@@ -291,6 +302,7 @@ impl WindowsSource {
             tracker: None,
             thumbs: Arc::new(RwLock::new(HashMap::new())),
             full_thumbs: Arc::new(RwLock::new(HashMap::new())),
+            last_active: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -321,11 +333,15 @@ fn apply_event(
     ev: zwindows::ToplevelEvent,
     resolver: &(dyn Fn(&str) -> Option<WindowIcon> + Send + Sync),
     memo: &IconMemo,
+    last_active: &Arc<AtomicU64>,
 ) {
     use zwindows::ToplevelEvent::*;
     let mut guard = items.write().unwrap();
     match ev {
         Added(tl) | Updated(tl) => {
+            if tl.activated {
+                last_active.store(tl.id, Ordering::Relaxed);
+            }
             let app_id = tl.app_id.unwrap_or_default();
             let title = tl.title.unwrap_or_default();
             let icon = resolve_icon_memoised(&app_id, resolver, memo);
@@ -339,6 +355,13 @@ fn apply_event(
         }
         Removed(id) => {
             guard.retain(|r| r.id != id);
+            // Clear sticky pointer if the activated window just closed.
+            let _ = last_active.compare_exchange(
+                id,
+                0,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            );
         }
     }
 }
@@ -604,16 +627,24 @@ impl Source for WindowsSource {
     fn preview_chrome(&self, ix: usize) -> Option<PreviewChrome> {
         let items = self.items.read().unwrap();
         let row = items.get(ix)?;
-        // No pills: `activated` is false for every row while zofi holds focus,
-        // so the pill would always be absent in practice. Metadata strip
-        // below carries the durable facts (app_id + window id).
+        // "active" pill tracks the sticky `last_active` pointer, not
+        // `row.activated` (which goes false for everyone once zofi grabs
+        // focus). Matches the mockup's intent: "this is the window you're
+        // coming back from".
+        let mut pills = Vec::new();
+        if self.last_active.load(Ordering::Relaxed) == row.id {
+            pills.push(PreviewPill {
+                text: "active".into(),
+                active: true,
+            });
+        }
         let metadata = vec![
             ("App".into(), row.app_id.clone()),
             ("ID".into(), format!("0x{:x}", row.id)),
         ];
         Some(PreviewChrome {
             title: row.display_label.clone(),
-            pills: Vec::new(),
+            pills,
             metadata,
         })
     }
@@ -840,6 +871,10 @@ mod tests {
         Arc::new(Mutex::new(HashMap::new()))
     }
 
+    fn null_last_active() -> Arc<AtomicU64> {
+        Arc::new(AtomicU64::new(0))
+    }
+
     fn null_resolver_fn() -> impl Fn(&str) -> Option<WindowIcon> + Send + Sync {
         |_: &str| None
     }
@@ -873,6 +908,7 @@ mod tests {
             zwindows::ToplevelEvent::Added(toplevel(1, "firefox", "t")),
             &null_resolver_fn(),
             &null_memo(),
+            &null_last_active(),
         );
         let guard = items.read().unwrap();
         assert_eq!(guard.len(), 1);
@@ -894,6 +930,7 @@ mod tests {
             }),
             &null_resolver_fn(),
             &null_memo(),
+            &null_last_active(),
         );
         let guard = items.read().unwrap();
         assert_eq!(guard.len(), 1, "update must not duplicate");
@@ -912,6 +949,7 @@ mod tests {
             zwindows::ToplevelEvent::Removed(1),
             &null_resolver_fn(),
             &null_memo(),
+            &null_last_active(),
         );
         let guard = items.read().unwrap();
         assert_eq!(guard.len(), 1);
@@ -938,6 +976,7 @@ mod tests {
             zwindows::ToplevelEvent::Added(toplevel(1, "Firefox", "t")),
             &resolver,
             &null_memo(),
+            &null_last_active(),
         );
         assert_eq!(calls.lock().unwrap().as_slice(), &["Firefox".to_string()]);
     }
@@ -953,6 +992,7 @@ mod tests {
             zwindows::ToplevelEvent::Added(toplevel(1, "firefox", "t")),
             &resolver,
             &null_memo(),
+            &null_last_active(),
         );
         let guard = items.read().unwrap();
         let got = guard[0]
@@ -973,6 +1013,7 @@ mod tests {
             zwindows::ToplevelEvent::Added(toplevel(1, "nonexistent-app", "t")),
             &null_resolver_fn(),
             &null_memo(),
+            &null_last_active(),
         );
         assert!(items.read().unwrap()[0].icon_data.is_none());
     }
@@ -996,12 +1037,14 @@ mod tests {
             zwindows::ToplevelEvent::Added(toplevel(1, "firefox", "a")),
             &resolver,
             &memo,
+            &null_last_active(),
         );
         apply_event(
             &items,
             zwindows::ToplevelEvent::Added(toplevel(2, "firefox", "b")),
             &resolver,
             &memo,
+            &null_last_active(),
         );
         assert_eq!(*count.lock().unwrap(), 1);
     }
@@ -1023,12 +1066,14 @@ mod tests {
             zwindows::ToplevelEvent::Added(toplevel(1, "firefox", "a")),
             &resolver,
             &memo,
+            &null_last_active(),
         );
         apply_event(
             &items,
             zwindows::ToplevelEvent::Added(toplevel(2, "kitty", "b")),
             &resolver,
             &memo,
+            &null_last_active(),
         );
         let got = seen.lock().unwrap().clone();
         assert_eq!(got, vec!["firefox".to_string(), "kitty".to_string()]);
@@ -1051,12 +1096,14 @@ mod tests {
             zwindows::ToplevelEvent::Added(toplevel(1, "ghost", "a")),
             &resolver,
             &memo,
+            &null_last_active(),
         );
         apply_event(
             &items,
             zwindows::ToplevelEvent::Updated(toplevel(1, "ghost", "b")),
             &resolver,
             &memo,
+            &null_last_active(),
         );
         assert_eq!(*count.lock().unwrap(), 1);
     }
@@ -1205,6 +1252,7 @@ mod tests {
             zwindows::ToplevelEvent::Added(toplevel(1, "", "unknown")),
             &resolver,
             &null_memo(),
+            &null_last_active(),
         );
         assert_eq!(*count.lock().unwrap(), 0);
     }

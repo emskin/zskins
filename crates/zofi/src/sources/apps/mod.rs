@@ -48,7 +48,7 @@ impl Source for AppsSource {
     }
 
     fn prefix(&self) -> Option<char> {
-        Some('>')
+        None
     }
 
     fn placeholder(&self) -> &'static str {
