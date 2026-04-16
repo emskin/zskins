@@ -75,6 +75,9 @@ impl Source for AppsSource {
 
     fn render_item(&self, ix: usize, selected: bool) -> AnyElement {
         let entry = &self.entries[ix];
+        // file_stem matches the WM class window managers report, so it makes
+        // a more useful secondary line than the GTK icon name.
+        let subtitle = entry.file_stem.clone();
         div()
             .h_full()
             .px(theme::PAD_X)
@@ -86,21 +89,39 @@ impl Source for AppsSource {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .text_size(theme::FONT_SIZE)
-                    .font_weight(if selected {
-                        FontWeight::MEDIUM
-                    } else {
-                        FontWeight::NORMAL
-                    })
-                    .text_color(if selected {
-                        theme::fg_accent()
-                    } else {
-                        theme::fg()
-                    })
-                    .child(entry.name.clone()),
+                    .flex()
+                    .flex_col()
+                    .justify_center()
+                    .gap(gpui::px(1.0))
+                    .child(
+                        div()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .text_size(theme::FONT_SIZE)
+                            .font_weight(if selected {
+                                FontWeight::MEDIUM
+                            } else {
+                                FontWeight::NORMAL
+                            })
+                            .text_color(if selected {
+                                theme::fg_accent()
+                            } else {
+                                theme::fg()
+                            })
+                            .child(entry.name.clone()),
+                    )
+                    .when(!subtitle.is_empty(), |d| {
+                        d.child(
+                            div()
+                                .text_size(theme::FONT_SIZE_SM)
+                                .text_color(theme::fg_dim())
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .child(subtitle),
+                        )
+                    }),
             )
             .into_any_element()
     }
