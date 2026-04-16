@@ -816,21 +816,26 @@ impl Launcher {
                     .into_any_element()
             }
             Some(Preview::Image(image)) => body_container
+                .px(px(20.0))
+                .py(px(20.0))
                 .flex()
                 .items_center()
                 .justify_center()
-                .px(px(20.0))
-                .py(px(16.0))
                 .child(
-                    // Image surface: border + slight inset shadow so the
-                    // letterbox area (when image aspect ≠ pane aspect) reads
-                    // as "frame around a distinct surface" rather than
-                    // "image floating in empty space".
+                    // Bordered surface fills the padded body, then the
+                    // image is contained inside it. Splitting the wrapper
+                    // (size_full) from the image (max_w_full + Contain)
+                    // keeps the padding visible: the previous version let
+                    // the img's max_h_full collapse the parent's py.
                     div()
+                        .size_full()
                         .rounded(px(6.0))
                         .border_1()
                         .border_color(theme::panel_border())
                         .overflow_hidden()
+                        .flex()
+                        .items_center()
+                        .justify_center()
                         .child(
                             img(image)
                                 .max_w_full()

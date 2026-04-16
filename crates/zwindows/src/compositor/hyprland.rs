@@ -15,12 +15,12 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use super::CompositorIpc;
+use super::{CompositorIpc, FocusedWindow};
 
 pub struct HyprlandIpc;
 
 impl CompositorIpc for HyprlandIpc {
-    fn focused_window(&self) -> Option<(String, String)> {
+    fn focused_window(&self) -> Option<FocusedWindow> {
         let his = std::env::var("HYPRLAND_INSTANCE_SIGNATURE").ok()?;
         let stream = open_socket(&his).ok()?;
         query_active_window(stream).ok()?
@@ -55,19 +55,23 @@ fn candidate_paths(his: &str) -> Vec<PathBuf> {
     out
 }
 
-fn query_active_window(mut stream: UnixStream) -> std::io::Result<Option<(String, String)>> {
+fn query_active_window(mut stream: UnixStream) -> std::io::Result<Option<FocusedWindow>> {
     stream.write_all(b"j/activewindow")?;
     let mut buf = String::new();
     stream.read_to_string(&mut buf)?;
     // Hyprland returns an empty object `{}` when no window is focused —
-    // serde will populate `class` and `title` as empty strings, which we
-    // filter to None below.
+    // serde populates `class`/`title` as empty strings, which we filter
+    // to None below.
     let parsed: ActiveWindow = serde_json::from_str(&buf)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     if parsed.class.is_empty() && parsed.title.is_empty() {
         return Ok(None);
     }
-    Ok(Some((parsed.class, parsed.title)))
+    Ok(Some(FocusedWindow {
+        app_id: parsed.class,
+        title: parsed.title,
+        workspace: parsed.workspace.and_then(|w| w.name),
+    }))
 }
 
 #[derive(Deserialize, Default)]
@@ -76,6 +80,14 @@ struct ActiveWindow {
     class: String,
     #[serde(default)]
     title: String,
+    #[serde(default)]
+    workspace: Option<Workspace>,
+}
+
+#[derive(Deserialize)]
+struct Workspace {
+    #[serde(default)]
+    name: Option<String>,
 }
 
 #[cfg(test)]

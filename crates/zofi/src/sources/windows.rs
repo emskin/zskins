@@ -135,13 +135,13 @@ pub struct WindowsSource {
     /// this sticky pointer lets the preview pane still mark the window
     /// the user would return to by pressing esc. Sentinel `0` = none.
     last_active: Arc<AtomicU64>,
-    /// Pre-zofi focused window's `(app_id, title)` from sway IPC. Captured
-    /// at construction time (before zofi grabs focus) because the
-    /// wlr-foreign-toplevel `State` event for the previously-focused window
-    /// often arrives only as `activated=false` — by the time we bind to
-    /// the protocol, focus has already moved to zofi. Used as a fallback
-    /// when `last_active` never gets a true reading.
-    pre_focus: Option<(String, String)>,
+    /// Pre-zofi focused window from the compositor IPC, captured at
+    /// construction time (before zofi grabs focus). The wlr-foreign-toplevel
+    /// `State` event for the previously-focused window often arrives only
+    /// as `activated=false` once we've bound to the protocol, so this
+    /// snapshot is the reliable signal. Carries workspace info too so the
+    /// preview can show a `ws · N` pill alongside `active`.
+    pre_focus: Option<zwindows::compositor::FocusedWindow>,
 }
 
 impl WindowsSource {
@@ -279,9 +279,7 @@ impl WindowsSource {
         // silent — unsupported compositors just lose the "active" pill.
         let ipc = zwindows::compositor::detect();
         let pre_focus = ipc.focused_window();
-        if let Some((ref app, ref title)) = pre_focus {
-            tracing::info!("pre-zofi focus: app_id={app:?} title={title:?}");
-        }
+        tracing::info!("pre-zofi focus: {pre_focus:?}");
 
         Self {
             items,
@@ -651,17 +649,42 @@ impl Source for WindowsSource {
         // pre-zofi snapshot (works whenever sway is the compositor —
         // covers the case where the toplevel state event for the
         // previously-focused window only ever reports activated=false).
-        let is_active = self.last_active.load(Ordering::Relaxed) == row.id
-            || self
-                .pre_focus
-                .as_ref()
-                .is_some_and(|(app, title)| app == &row.app_id && title == &row.title);
+        let last_id = self.last_active.load(Ordering::Relaxed);
+        let by_id = last_id == row.id;
+        // Loose match against the sway snapshot: case-insensitive + accept
+        // either an exact (app_id, title) pair OR a substring app_id hit
+        // when the title disagrees. XWayland windows often surface as
+        // `WeChat (Universal)` from one source and `wechat` from the other,
+        // so insisting on byte-exact match silently kills the pill.
+        let by_focus = self.pre_focus.as_ref().is_some_and(|f| {
+            let app_l = f.app_id.to_lowercase();
+            let title_l = f.title.to_lowercase();
+            let row_app = row.app_id.to_lowercase();
+            let row_title = row.title.to_lowercase();
+            let app_match =
+                row_app == app_l || row_app.contains(&app_l) || app_l.contains(&row_app);
+            let title_match = row_title == title_l;
+            app_match && title_match
+        });
+        let is_active = by_id || by_focus;
         let mut pills = Vec::new();
         if is_active {
             pills.push(PreviewPill {
                 text: "active".into(),
                 active: true,
             });
+            // Workspace pill rides next to active — only meaningful for
+            // the focused window, sourced from the compositor IPC.
+            if let Some(ws) = self
+                .pre_focus
+                .as_ref()
+                .and_then(|f| f.workspace.as_deref())
+            {
+                pills.push(PreviewPill {
+                    text: format!("ws · {ws}"),
+                    active: false,
+                });
+            }
         }
         // app_id is what wlr-foreign-toplevel reports as the Wayland app id
         // (for native clients) or the X11 WM_CLASS (for XWayland). Two-row

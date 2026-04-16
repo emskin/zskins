@@ -67,21 +67,36 @@ pub fn fetch_windows() -> Result<Vec<WindowGeom>, SwayTreeError> {
 }
 
 /// `(app_id, title)` of the focused container, or `None` if nothing is
-/// focused (rare — sway always reports a focused workspace, but the focus
-/// may be on an empty workspace background). Used to mark the
-/// "you're coming back from this" window in the launcher's preview pane,
-/// since the wlr-foreign-toplevel state events fire too late once zofi
-/// has already grabbed keyboard focus.
+/// focused. Thin wrapper around [`focused_window_with_workspace`] for
+/// callers that don't care which workspace holds the focused window.
 pub fn focused_window() -> Result<Option<(String, String)>, SwayTreeError> {
+    focused_window_with_workspace()
+        .map(|opt| opt.map(|(app, title, _ws)| (app, title)))
+}
+
+/// `(app_id, title, workspace_name)` of the focused container. The
+/// workspace is the nearest enclosing node of type `workspace`. Returns
+/// `None` if nothing is focused (rare — sway always reports some focused
+/// thing, but the focus may be on an empty workspace background).
+pub fn focused_window_with_workspace()
+-> Result<Option<(String, String, Option<String>)>, SwayTreeError> {
     let path = std::env::var("SWAYSOCK").map_err(|_| SwayTreeError::NoSocket)?;
     let mut stream = UnixStream::connect(path)?;
     write_message(&mut stream, MSG_GET_TREE, b"")?;
     let (_ty, payload) = read_message(&mut stream)?;
     let raw: RawNode = serde_json::from_slice(&payload)?;
-    Ok(find_focused(&raw))
+    Ok(find_focused(&raw, None))
 }
 
-fn find_focused(node: &RawNode) -> Option<(String, String)> {
+fn find_focused(
+    node: &RawNode,
+    current_workspace: Option<String>,
+) -> Option<(String, String, Option<String>)> {
+    let workspace = if node.node_type.as_deref() == Some("workspace") {
+        node.name.clone()
+    } else {
+        current_workspace
+    };
     if node.focused == Some(true) {
         let app_id = node.app_id.clone().unwrap_or_else(|| {
             node.window_properties
@@ -90,10 +105,10 @@ fn find_focused(node: &RawNode) -> Option<(String, String)> {
                 .unwrap_or_default()
         });
         let title = node.name.clone().unwrap_or_default();
-        return Some((app_id, title));
+        return Some((app_id, title, workspace));
     }
     for child in node.nodes.iter().chain(node.floating_nodes.iter()) {
-        if let Some(found) = find_focused(child) {
+        if let Some(found) = find_focused(child, workspace.clone()) {
             return Some(found);
         }
     }
