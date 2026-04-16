@@ -944,7 +944,7 @@ impl Launcher {
     }
 
     fn render_source_bar(&self, cx: &mut Context<Self>) -> gpui::Div {
-        let mut bar = div().flex().items_center().gap(px(8.0)).pl(theme::PAD_X);
+        let mut bar = div().flex().items_center().gap(px(4.0));
         // Flat layout: every reachable view is a peer pill. UnionAll uses
         // its outer registry icon; UnionChild uses its child's icon. This
         // collapses the previous two-level (outer tabs + sub-filter tabs)
@@ -1271,20 +1271,22 @@ impl Render for Launcher {
                     .child(body)
                     .child(
                         div()
-                            .h(px(34.0))
+                            .h(px(44.0))
+                            .px(px(14.0))
                             .flex()
                             .items_center()
                             .justify_between()
+                            .gap(px(16.0))
                             .border_t_1()
                             .border_color(theme::bar_border())
+                            .bg(theme::panel_bg())
                             .text_size(theme::FONT_SIZE_SM)
                             .child(source_bar)
                             .child(
                                 div()
-                                    .pr(theme::PAD_X)
                                     .flex()
                                     .items_center()
-                                    .gap(px(16.0))
+                                    .gap(px(14.0))
                                     .child(key_hint(
                                         match self.left_pane {
                                             LeftPane::Items => "Mimes",
