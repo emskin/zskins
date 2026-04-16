@@ -135,6 +135,13 @@ pub struct WindowsSource {
     /// this sticky pointer lets the preview pane still mark the window
     /// the user would return to by pressing esc. Sentinel `0` = none.
     last_active: Arc<AtomicU64>,
+    /// Pre-zofi focused window's `(app_id, title)` from sway IPC. Captured
+    /// at construction time (before zofi grabs focus) because the
+    /// wlr-foreign-toplevel `State` event for the previously-focused window
+    /// often arrives only as `activated=false` — by the time we bind to
+    /// the protocol, focus has already moved to zofi. Used as a fallback
+    /// when `last_active` never gets a true reading.
+    pre_focus: Option<(String, String)>,
 }
 
 impl WindowsSource {
@@ -266,6 +273,14 @@ impl WindowsSource {
             })
             .expect("spawn zofi-windows-capture thread");
 
+        // Best-effort: snapshot the focused window via sway IPC BEFORE the
+        // launcher takes input focus. Failures are silent — non-sway
+        // compositors just lose the "active" pill in the preview header.
+        let pre_focus = zwindows::sway_tree::focused_window().ok().flatten();
+        if let Some((ref app, ref title)) = pre_focus {
+            tracing::info!("pre-zofi focus: app_id={app:?} title={title:?}");
+        }
+
         Self {
             items,
             activate_cb,
@@ -274,6 +289,7 @@ impl WindowsSource {
             thumbs,
             full_thumbs,
             last_active,
+            pre_focus,
         }
     }
 
@@ -303,6 +319,7 @@ impl WindowsSource {
             thumbs: Arc::new(RwLock::new(HashMap::new())),
             full_thumbs: Arc::new(RwLock::new(HashMap::new())),
             last_active: Arc::new(AtomicU64::new(0)),
+            pre_focus: None,
         }
     }
 
@@ -627,17 +644,27 @@ impl Source for WindowsSource {
     fn preview_chrome(&self, ix: usize) -> Option<PreviewChrome> {
         let items = self.items.read().unwrap();
         let row = items.get(ix)?;
-        // "active" pill tracks the sticky `last_active` pointer, not
-        // `row.activated` (which goes false for everyone once zofi grabs
-        // focus). Matches the mockup's intent: "this is the window you're
-        // coming back from".
+        // "active" pill: prefer the wlr-foreign-toplevel sticky pointer
+        // (works on any wlroots compositor), fall back to the sway IPC
+        // pre-zofi snapshot (works whenever sway is the compositor —
+        // covers the case where the toplevel state event for the
+        // previously-focused window only ever reports activated=false).
+        let is_active = self.last_active.load(Ordering::Relaxed) == row.id
+            || self
+                .pre_focus
+                .as_ref()
+                .is_some_and(|(app, title)| app == &row.app_id && title == &row.title);
         let mut pills = Vec::new();
-        if self.last_active.load(Ordering::Relaxed) == row.id {
+        if is_active {
             pills.push(PreviewPill {
                 text: "active".into(),
                 active: true,
             });
         }
+        // app_id is what wlr-foreign-toplevel reports as the Wayland app id
+        // (for native clients) or the X11 WM_CLASS (for XWayland). Two-row
+        // layout matches the mockup's information density without faking
+        // a PID lookup we can't actually do per-row.
         let metadata = vec![
             ("App".into(), row.app_id.clone()),
             ("ID".into(), format!("0x{:x}", row.id)),

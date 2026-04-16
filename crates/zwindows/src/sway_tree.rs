@@ -66,6 +66,40 @@ pub fn fetch_windows() -> Result<Vec<WindowGeom>, SwayTreeError> {
     Ok(out)
 }
 
+/// `(app_id, title)` of the focused container, or `None` if nothing is
+/// focused (rare — sway always reports a focused workspace, but the focus
+/// may be on an empty workspace background). Used to mark the
+/// "you're coming back from this" window in the launcher's preview pane,
+/// since the wlr-foreign-toplevel state events fire too late once zofi
+/// has already grabbed keyboard focus.
+pub fn focused_window() -> Result<Option<(String, String)>, SwayTreeError> {
+    let path = std::env::var("SWAYSOCK").map_err(|_| SwayTreeError::NoSocket)?;
+    let mut stream = UnixStream::connect(path)?;
+    write_message(&mut stream, MSG_GET_TREE, b"")?;
+    let (_ty, payload) = read_message(&mut stream)?;
+    let raw: RawNode = serde_json::from_slice(&payload)?;
+    Ok(find_focused(&raw))
+}
+
+fn find_focused(node: &RawNode) -> Option<(String, String)> {
+    if node.focused == Some(true) {
+        let app_id = node.app_id.clone().unwrap_or_else(|| {
+            node.window_properties
+                .as_ref()
+                .and_then(|w| w.class.clone())
+                .unwrap_or_default()
+        });
+        let title = node.name.clone().unwrap_or_default();
+        return Some((app_id, title));
+    }
+    for child in node.nodes.iter().chain(node.floating_nodes.iter()) {
+        if let Some(found) = find_focused(child) {
+            return Some(found);
+        }
+    }
+    None
+}
+
 fn write_message(stream: &mut UnixStream, msg_type: u32, payload: &[u8]) -> std::io::Result<()> {
     let mut buf = Vec::with_capacity(14 + payload.len());
     buf.extend_from_slice(MAGIC);
@@ -106,6 +140,8 @@ struct RawNode {
     app_id: Option<String>,
     #[serde(default)]
     visible: Option<bool>,
+    #[serde(default)]
+    focused: Option<bool>,
     #[serde(default)]
     rect: Option<RawRect>,
     #[serde(default)]

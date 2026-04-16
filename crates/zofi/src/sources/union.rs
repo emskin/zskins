@@ -194,7 +194,7 @@ impl Source for UnionSource {
                     .justify_center()
                     .text_color(tint)
                     .text_size(theme::FONT_SIZE)
-                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .font_weight(gpui::FontWeight::BOLD)
                     .border_r_1()
                     .border_color(theme::panel_border())
                     .child(glyph),
