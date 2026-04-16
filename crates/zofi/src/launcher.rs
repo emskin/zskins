@@ -641,14 +641,21 @@ impl Launcher {
                     .size_full()
                     .flex()
                     .child(
-                        // 4px accent bar flush to the row's left edge.
-                        div().w(px(4.0)).h_full().bg(theme::accent()),
+                        // 3px accent bar with 6px top/bottom margin and
+                        // rounded right corners — matches the mockup's
+                        // status-strip silhouette rather than a full-height
+                        // wall.
+                        div()
+                            .w(px(3.0))
+                            .my(px(6.0))
+                            .rounded_r(px(2.0))
+                            .bg(theme::accent()),
                     )
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
-                            .ml(px(4.0))
+                            .ml(px(6.0))
                             .mr(px(6.0))
                             .rounded(theme::ITEM_RADIUS)
                             .bg(theme::accent_soft())
@@ -701,12 +708,11 @@ impl Launcher {
             row = row.child(
                 div()
                     .size_full()
-                    .mx(px(6.0))
                     .flex()
                     .child(
                         div()
                             .w(px(3.0))
-                            .my(px(4.0))
+                            .my(px(6.0))
                             .rounded_r(px(2.0))
                             .bg(theme::accent()),
                     )
@@ -714,6 +720,8 @@ impl Launcher {
                         div()
                             .flex_1()
                             .min_w_0()
+                            .ml(px(6.0))
+                            .mr(px(6.0))
                             .rounded(theme::ITEM_RADIUS)
                             .bg(theme::accent_soft())
                             .child(content),
