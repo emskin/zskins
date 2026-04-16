@@ -1341,10 +1341,23 @@ fn tab_pill(
         .flex()
         .items_center()
         .gap(px(6.0))
-        // Tint only the glyph — the label keeps fg/fg_dim so selected state
-        // stays the dominant visual signal. Icon tint is the secondary
-        // "which source family does this tab belong to" cue.
-        .child(div().text_size(px(15.0)).text_color(tint).child(icon))
+        // Icon is rendered inside a fixed 16x16 chip so per-glyph metric
+        // differences (◉ vs ◱ vs ▣) don't translate to per-tab size jitter.
+        // Tint applies only to the glyph; label keeps fg/fg_dim so the
+        // selected state stays the dominant visual signal.
+        .child(
+            div()
+                .w(px(16.0))
+                .h(px(16.0))
+                .rounded(px(3.0))
+                .bg(theme::kbd_bg())
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(10.0))
+                .text_color(tint)
+                .child(icon),
+        )
         .child(div().child(label))
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
             if let Some(this) = entity.upgrade() {
