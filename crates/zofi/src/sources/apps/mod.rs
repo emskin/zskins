@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use gpui::{div, img, prelude::*, AnyElement, FontWeight, ObjectFit};
 
-use crate::source::{ActivateOutcome, Layout, Preview, Source};
+use crate::source::{ActivateOutcome, Layout, Preview, PreviewChrome, Source};
 use crate::theme;
 use crate::usage::UsageTracker;
 
@@ -44,7 +44,7 @@ impl Source for AppsSource {
     }
 
     fn icon(&self) -> &'static str {
-        "🚀"
+        "▣"
     }
 
     fn prefix(&self) -> Option<char> {
@@ -75,6 +75,9 @@ impl Source for AppsSource {
 
     fn render_item(&self, ix: usize, selected: bool) -> AnyElement {
         let entry = &self.entries[ix];
+        // file_stem matches the WM class window managers report, so it makes
+        // a more useful secondary line than the GTK icon name.
+        let subtitle = entry.file_stem.clone();
         div()
             .h_full()
             .px(theme::PAD_X)
@@ -86,21 +89,35 @@ impl Source for AppsSource {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .text_size(theme::FONT_SIZE)
-                    .font_weight(if selected {
-                        FontWeight::MEDIUM
-                    } else {
-                        FontWeight::NORMAL
-                    })
-                    .text_color(if selected {
-                        theme::fg_accent()
-                    } else {
-                        theme::fg()
-                    })
-                    .child(entry.name.clone()),
+                    .flex()
+                    .flex_col()
+                    .justify_center()
+                    .gap(gpui::px(1.0))
+                    .child(
+                        div()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .text_size(theme::FONT_SIZE)
+                            .font_weight(if selected {
+                                FontWeight::SEMIBOLD
+                            } else {
+                                FontWeight::NORMAL
+                            })
+                            .text_color(if selected { gpui::white() } else { theme::fg() })
+                            .child(entry.name.clone()),
+                    )
+                    .when(!subtitle.is_empty(), |d| {
+                        d.child(
+                            div()
+                                .text_size(theme::FONT_SIZE_SM)
+                                .text_color(theme::fg_dim())
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .child(subtitle),
+                        )
+                    }),
             )
             .into_any_element()
     }
@@ -130,6 +147,22 @@ impl Source for AppsSource {
 
     fn layout(&self) -> Layout {
         Layout::ListAndPreview
+    }
+
+    fn preview_chrome(&self, ix: usize) -> Option<PreviewChrome> {
+        let entry = self.entries.get(ix)?;
+        let mut metadata: Vec<(String, String)> = Vec::new();
+        if !entry.file_stem.is_empty() {
+            metadata.push(("File".into(), entry.file_stem.clone()));
+        }
+        if let Some(ref cls) = entry.startup_wm_class {
+            metadata.push(("Class".into(), cls.clone()));
+        }
+        Some(PreviewChrome {
+            title: entry.name.to_string(),
+            pills: Vec::new(),
+            metadata,
+        })
     }
 
     fn preview(&self, ix: usize) -> Option<Preview> {

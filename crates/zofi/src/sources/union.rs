@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use gpui::{div, prelude::*, px, AnyElement, Image};
 
-use crate::source::{ActivateOutcome, Layout, Preview, Source, SourceMeta};
+use crate::source::{ActivateOutcome, Layout, Preview, PreviewChrome, Source, SourceMeta};
 use crate::theme;
 
 /// Width of the source-type gutter shown next to each row in mixed view.
@@ -177,6 +177,10 @@ impl Source for UnionSource {
             return child;
         }
         let glyph = self.children[r.child_idx].icon();
+        // Tint the gutter glyph by the child's category so the eye can
+        // sort rows at a glance (windows/apps/files/clipboard each get a
+        // distinct hue). Falls back to accent for unknown sources.
+        let tint = theme::category(self.children[r.child_idx].name());
         div()
             .flex()
             .items_center()
@@ -188,8 +192,9 @@ impl Source for UnionSource {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .text_color(theme::fg_dim())
-                    .text_size(theme::FONT_SIZE_SM)
+                    .text_color(tint)
+                    .text_size(theme::FONT_SIZE)
+                    .font_weight(gpui::FontWeight::BOLD)
                     .border_r_1()
                     .border_color(theme::panel_border())
                     .child(glyph),
@@ -224,6 +229,11 @@ impl Source for UnionSource {
     fn preview(&self, ix: usize) -> Option<Preview> {
         let r = self.route(ix);
         self.children[r.child_idx].preview(r.inner_ix)
+    }
+
+    fn preview_chrome(&self, ix: usize) -> Option<PreviewChrome> {
+        let r = self.route(ix);
+        self.children[r.child_idx].preview_chrome(r.inner_ix)
     }
 
     fn peek_image(&self, ix: usize) -> Option<Arc<Image>> {

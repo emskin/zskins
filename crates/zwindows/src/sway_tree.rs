@@ -66,6 +66,54 @@ pub fn fetch_windows() -> Result<Vec<WindowGeom>, SwayTreeError> {
     Ok(out)
 }
 
+/// `(app_id, title)` of the focused container, or `None` if nothing is
+/// focused. Thin wrapper around [`focused_window_with_workspace`] for
+/// callers that don't care which workspace holds the focused window.
+pub fn focused_window() -> Result<Option<(String, String)>, SwayTreeError> {
+    focused_window_with_workspace().map(|opt| opt.map(|(app, title, _ws)| (app, title)))
+}
+
+/// `(app_id, title, workspace_name)` of the focused container. The
+/// workspace is the nearest enclosing node of type `workspace`. Returns
+/// `None` if nothing is focused (rare — sway always reports some focused
+/// thing, but the focus may be on an empty workspace background).
+pub fn focused_window_with_workspace(
+) -> Result<Option<(String, String, Option<String>)>, SwayTreeError> {
+    let path = std::env::var("SWAYSOCK").map_err(|_| SwayTreeError::NoSocket)?;
+    let mut stream = UnixStream::connect(path)?;
+    write_message(&mut stream, MSG_GET_TREE, b"")?;
+    let (_ty, payload) = read_message(&mut stream)?;
+    let raw: RawNode = serde_json::from_slice(&payload)?;
+    Ok(find_focused(&raw, None))
+}
+
+fn find_focused(
+    node: &RawNode,
+    current_workspace: Option<String>,
+) -> Option<(String, String, Option<String>)> {
+    let workspace = if node.node_type.as_deref() == Some("workspace") {
+        node.name.clone()
+    } else {
+        current_workspace
+    };
+    if node.focused == Some(true) {
+        let app_id = node.app_id.clone().unwrap_or_else(|| {
+            node.window_properties
+                .as_ref()
+                .and_then(|w| w.class.clone())
+                .unwrap_or_default()
+        });
+        let title = node.name.clone().unwrap_or_default();
+        return Some((app_id, title, workspace));
+    }
+    for child in node.nodes.iter().chain(node.floating_nodes.iter()) {
+        if let Some(found) = find_focused(child, workspace.clone()) {
+            return Some(found);
+        }
+    }
+    None
+}
+
 fn write_message(stream: &mut UnixStream, msg_type: u32, payload: &[u8]) -> std::io::Result<()> {
     let mut buf = Vec::with_capacity(14 + payload.len());
     buf.extend_from_slice(MAGIC);
@@ -106,6 +154,8 @@ struct RawNode {
     app_id: Option<String>,
     #[serde(default)]
     visible: Option<bool>,
+    #[serde(default)]
+    focused: Option<bool>,
     #[serde(default)]
     rect: Option<RawRect>,
     #[serde(default)]
@@ -268,5 +318,70 @@ mod tests {
         for w in &out {
             assert!(!w.app_id.is_empty(), "windows must have an app_id");
         }
+    }
+
+    /// Tree with a focused leaf nested inside a workspace, so we can
+    /// verify that `find_focused` propagates the workspace name through
+    /// the descent rather than losing it at the leaf.
+    const FOCUSED_TREE: &str = r#"
+    {
+        "type":"root","name":"root",
+        "rect":{"x":0,"y":0,"width":1920,"height":1080},
+        "nodes":[{"type":"output","name":"DP-1",
+            "rect":{"x":0,"y":0,"width":1920,"height":1080},
+            "nodes":[{"type":"workspace","name":"4: code",
+                "rect":{"x":0,"y":0,"width":1920,"height":1080},
+                "nodes":[
+                    {"type":"con","name":"main.rs","app_id":"kitty",
+                     "visible":true,"focused":false,
+                     "rect":{"x":0,"y":0,"width":960,"height":1080}},
+                    {"type":"con","name":"Issues — zskins","app_id":"firefox",
+                     "visible":true,"focused":true,
+                     "rect":{"x":960,"y":0,"width":960,"height":1080}}
+                ]}]}]
+    }
+    "#;
+
+    #[test]
+    fn find_focused_returns_app_title_and_workspace() {
+        let raw: RawNode = serde_json::from_str(FOCUSED_TREE).unwrap();
+        let got = find_focused(&raw, None).expect("focused leaf is present");
+        assert_eq!(got.0, "firefox");
+        assert_eq!(got.1, "Issues — zskins");
+        assert_eq!(got.2.as_deref(), Some("4: code"));
+    }
+
+    #[test]
+    fn find_focused_returns_none_when_nothing_focused() {
+        // Same tree shape but every leaf has focused=false.
+        let payload = r#"
+        {"type":"root","name":"root","nodes":[
+            {"type":"output","name":"DP-1","nodes":[
+                {"type":"workspace","name":"1","nodes":[
+                    {"type":"con","name":"a","app_id":"alacritty",
+                     "visible":true,"focused":false,
+                     "rect":{"x":0,"y":0,"width":1,"height":1}}
+                ]}]}]}
+        "#;
+        let raw: RawNode = serde_json::from_str(payload).unwrap();
+        assert!(find_focused(&raw, None).is_none());
+    }
+
+    #[test]
+    fn find_focused_falls_back_to_xwayland_class() {
+        let payload = r#"
+        {"type":"root","name":"root","nodes":[
+            {"type":"output","name":"DP-1","nodes":[
+                {"type":"workspace","name":"3","nodes":[
+                    {"type":"con","name":"GIMP","focused":true,
+                     "visible":true,
+                     "rect":{"x":0,"y":0,"width":1,"height":1},
+                     "window_properties":{"class":"Gimp"}}
+                ]}]}]}
+        "#;
+        let raw: RawNode = serde_json::from_str(payload).unwrap();
+        let got = find_focused(&raw, None).expect("focused leaf");
+        assert_eq!(got.0, "Gimp");
+        assert_eq!(got.2.as_deref(), Some("3"));
     }
 }

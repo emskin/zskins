@@ -17,7 +17,7 @@ pub const PREVIEW_IMG_MAX_H: Pixels = px(508.0);
 pub const PANEL_RADIUS: Pixels = px(10.0);
 
 pub const ICON_SIZE: Pixels = px(24.0);
-pub const ITEM_HEIGHT: Pixels = px(38.0);
+pub const ITEM_HEIGHT: Pixels = px(44.0);
 pub const ITEM_RADIUS: Pixels = px(6.0);
 pub const INPUT_HEIGHT: Pixels = px(36.0);
 
@@ -62,6 +62,14 @@ pub fn hover_bg() -> Hsla {
     rgb_alpha(0x363645, 0.5)
 }
 
+// Accent (selected row bar, active tab underline, primary key hint)
+pub fn accent() -> Hsla {
+    rgb(0x4f8cff).into()
+}
+pub fn accent_soft() -> Hsla {
+    rgb_alpha(0x4f8cff, 0.22)
+}
+
 // Preview pane: slightly darker than the panel to suggest a separate surface.
 pub fn preview_bg() -> Hsla {
     rgb(0x1d1d27).into()
@@ -84,4 +92,45 @@ pub fn kind_image_bg() -> Hsla {
 // Bottom bar
 pub fn bar_border() -> Hsla {
     rgb_alpha(0x4e4e60, 0.25)
+}
+
+// Keyboard-hint pills (bottom bar)
+pub fn kbd_bg() -> Hsla {
+    rgb(0x30353f).into()
+}
+pub fn kbd_fg() -> Hsla {
+    rgb(0xaab1bc).into()
+}
+pub fn kbd_border() -> Hsla {
+    rgb_alpha(0x3d4350, 1.0)
+}
+pub fn kbd_accent_bg() -> Hsla {
+    rgb_alpha(0x4f8cff, 0.25)
+}
+pub fn kbd_accent_fg() -> Hsla {
+    rgb(0xe5edff).into()
+}
+pub fn kbd_accent_border() -> Hsla {
+    rgb_alpha(0x4f8cff, 0.45)
+}
+
+// Preview-header "active" pill: green text on a translucent green bg.
+pub fn pill_active_fg() -> Hsla {
+    rgb(0x5ecf8a).into()
+}
+pub fn pill_active_bg() -> Hsla {
+    rgb_alpha(0x5ecf8a, 0.15)
+}
+
+/// Per-source tint for icons in the source bar and union gutter. Unknown
+/// names fall back to the generic `accent()` so new sources are never
+/// visually broken — just un-tinted until they get a palette entry.
+pub fn category(name: &str) -> Hsla {
+    match name {
+        "windows" => rgb(0x4aa8ff).into(),
+        "apps" => rgb(0xff9933).into(),
+        "files" => rgb(0x33cc66).into(),
+        "clipboard" => rgb(0xc466ff).into(),
+        _ => accent(),
+    }
 }

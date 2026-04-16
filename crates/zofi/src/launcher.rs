@@ -2,14 +2,16 @@ use std::collections::HashMap;
 
 use gpui::{
     actions, div, img, prelude::*, px, uniform_list, AnyElement, App, Context, Entity, FocusHandle,
-    Focusable, FontWeight, HighlightStyle, KeyBinding, MouseButton, ObjectFit, ScrollStrategy,
-    StyledText, UniformListScrollHandle, Window,
+    Focusable, FontWeight, HighlightStyle, Hsla, KeyBinding, MouseButton, ObjectFit,
+    ScrollStrategy, StyledText, UniformListScrollHandle, Window,
 };
 
 use crate::highlight;
 use crate::input::TextInput;
 use crate::registry::SourceRegistry;
-use crate::source::{ActivateOutcome, Layout, Preview, Source, SourceMeta};
+use crate::source::{
+    ActivateOutcome, Layout, Preview, PreviewChrome, PreviewPill, Source, SourceMeta,
+};
 use crate::theme;
 
 const PREVIEW_TEXT_MAX_LINES: usize = 200;
@@ -387,14 +389,27 @@ impl Launcher {
     }
 
     /// Reset TextInput after a source switch and notify for repaint.
+    /// The text_input write is deferred: this fn is reached from the
+    /// `cx.observe(&text_input, ...)` callback chain, which may still be
+    /// inside text_input's own update() lock — synchronously calling
+    /// `text_input.update` from there panics with "already being updated".
+    /// Deferring also keeps the case where we're invoked from a non-input
+    /// callback (tab click / empty backspace) correct: the closure runs
+    /// next tick on a clean stack.
     fn finish_slot_switch(&mut self, cx: &mut Context<Self>) {
         let placeholder = self.source().placeholder();
         self.last_query = String::new();
-        self.text_input.update(cx, |input, cx| {
-            input.set_placeholder(placeholder);
-            input.set_text("", cx);
+        let text_input = self.text_input.clone();
+        let entity = cx.entity().downgrade();
+        cx.defer(move |cx| {
+            text_input.update(cx, |input, cx| {
+                input.set_placeholder(placeholder);
+                input.set_text("", cx);
+            });
+            if let Some(this) = entity.upgrade() {
+                this.update(cx, |_, cx| cx.notify());
+            }
         });
-        cx.notify();
     }
 
     /// Full slot activation with focus restore. Used by bar tab clicks and
@@ -637,10 +652,28 @@ impl Launcher {
             row = row.child(
                 div()
                     .size_full()
-                    .mx(px(6.0))
-                    .rounded(theme::ITEM_RADIUS)
-                    .bg(theme::selected_bg())
-                    .child(content),
+                    .flex()
+                    .child(
+                        // 3px accent bar with 6px top/bottom margin and
+                        // rounded right corners — matches the mockup's
+                        // status-strip silhouette rather than a full-height
+                        // wall.
+                        div()
+                            .w(px(3.0))
+                            .my(px(6.0))
+                            .rounded_r(px(2.0))
+                            .bg(theme::accent()),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .ml(px(6.0))
+                            .mr(px(6.0))
+                            .rounded(theme::ITEM_RADIUS)
+                            .bg(theme::accent_soft())
+                            .child(content),
+                    ),
             );
         } else {
             row = row
@@ -688,10 +721,24 @@ impl Launcher {
             row = row.child(
                 div()
                     .size_full()
-                    .mx(px(6.0))
-                    .rounded(theme::ITEM_RADIUS)
-                    .bg(theme::selected_bg())
-                    .child(content),
+                    .flex()
+                    .child(
+                        div()
+                            .w(px(3.0))
+                            .my(px(6.0))
+                            .rounded_r(px(2.0))
+                            .bg(theme::accent()),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .ml(px(6.0))
+                            .mr(px(6.0))
+                            .rounded(theme::ITEM_RADIUS)
+                            .bg(theme::accent_soft())
+                            .child(content),
+                    ),
             );
         } else {
             row = row
@@ -717,6 +764,13 @@ impl Launcher {
             Some(&i) => i,
             None => return div().size_full().bg(theme::preview_bg()).into_any_element(),
         };
+        // Header/metadata chrome is an opt-in per source. Mime view suppresses
+        // it: the right pane is showing a mime variant, not the item itself,
+        // so the item-level title/metadata would be misleading.
+        let chrome = match self.left_pane {
+            LeftPane::Items => self.source().preview_chrome(item_ix),
+            LeftPane::Mimes => None,
+        };
         let preview = match self.left_pane {
             LeftPane::Items => self.source().preview(item_ix),
             LeftPane::Mimes => match self.mime_cache.get(self.mimes.selected) {
@@ -725,34 +779,32 @@ impl Launcher {
             },
         };
 
-        let pane = div()
-            .size_full()
-            .bg(theme::preview_bg())
-            .px(px(20.0))
-            .py(px(16.0))
-            .overflow_hidden();
-        match preview {
+        let body_container = div().flex_1().min_h_0().overflow_hidden();
+        let body: AnyElement = match preview {
             Some(Preview::Text(s)) => {
-                let body: String = s
+                let text: String = s
                     .lines()
                     .take(PREVIEW_TEXT_MAX_LINES)
                     .collect::<Vec<_>>()
                     .join("\n");
-                pane.id("preview-text")
+                body_container
+                    .id("preview-text")
                     .overflow_y_scroll()
+                    .px(px(20.0))
+                    .py(px(16.0))
                     .text_size(theme::PREVIEW_FONT_SIZE)
                     .line_height(px(22.0))
                     .text_color(theme::fg())
-                    .child(body)
+                    .child(text)
                     .into_any_element()
             }
             Some(Preview::Code { text, lang }) => {
-                let body: String = text
+                let code: String = text
                     .lines()
                     .take(PREVIEW_TEXT_MAX_LINES)
                     .collect::<Vec<_>>()
                     .join("\n");
-                let runs = highlight::highlight(&body, &lang, theme::fg());
+                let runs = highlight::highlight(&code, &lang, theme::fg());
                 let highlights: Vec<(std::ops::Range<usize>, HighlightStyle)> = runs
                     .into_iter()
                     .map(|(r, color)| {
@@ -765,27 +817,47 @@ impl Launcher {
                         )
                     })
                     .collect();
-                pane.id("preview-code")
+                body_container
+                    .id("preview-code")
                     .overflow_y_scroll()
+                    .px(px(20.0))
+                    .py(px(16.0))
                     .text_size(theme::PREVIEW_FONT_SIZE)
                     .line_height(px(22.0))
                     .text_color(theme::fg())
-                    .child(StyledText::new(body).with_highlights(highlights))
+                    .child(StyledText::new(code).with_highlights(highlights))
                     .into_any_element()
             }
-            Some(Preview::Image(image)) => pane
+            Some(Preview::Image(image)) => body_container
+                .px(px(20.0))
+                .py(px(20.0))
                 .flex()
                 .items_center()
                 .justify_center()
                 .child(
-                    img(image)
-                        .max_w_full()
-                        .max_h_full()
-                        .object_fit(ObjectFit::Contain)
-                        .rounded(px(4.0)),
+                    // Bordered surface fills the padded body, then the
+                    // image is contained inside it. Splitting the wrapper
+                    // (size_full) from the image (max_w_full + Contain)
+                    // keeps the padding visible: the previous version let
+                    // the img's max_h_full collapse the parent's py.
+                    div()
+                        .size_full()
+                        .rounded(px(6.0))
+                        .border_1()
+                        .border_color(theme::panel_border())
+                        .overflow_hidden()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            img(image)
+                                .max_w_full()
+                                .max_h_full()
+                                .object_fit(ObjectFit::Contain),
+                        ),
                 )
                 .into_any_element(),
-            None => pane
+            None => body_container
                 .flex()
                 .items_center()
                 .justify_center()
@@ -793,7 +865,22 @@ impl Launcher {
                 .text_size(theme::FONT_SIZE_SM)
                 .child("(no preview)")
                 .into_any_element(),
-        }
+        };
+
+        let header = chrome.as_ref().map(preview_header);
+        let footer = chrome
+            .as_ref()
+            .filter(|c| !c.metadata.is_empty())
+            .map(preview_metadata_strip);
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .bg(theme::preview_bg())
+            .children(header)
+            .child(body)
+            .children(footer)
+            .into_any_element()
     }
 
     /// Full-screen peek overlay: dark backdrop + centered full-resolution
@@ -875,17 +962,21 @@ impl Launcher {
     }
 
     fn render_source_bar(&self, cx: &mut Context<Self>) -> gpui::Div {
-        let mut bar = div().flex().items_center().gap(px(8.0)).pl(theme::PAD_X);
+        let mut bar = div().flex().items_center().gap(px(4.0));
         // Flat layout: every reachable view is a peer pill. UnionAll uses
         // its outer registry icon; UnionChild uses its child's icon. This
         // collapses the previous two-level (outer tabs + sub-filter tabs)
         // navigation into one row — there are no nested levels to discover.
         for (ix, slot) in self.slots.iter().enumerate() {
             let icon = self.slot_icon(*slot);
+            let label = self.slot_label(*slot);
+            let tint = self.slot_tint(*slot);
             let selected = ix == self.active_slot;
             let tab = tab_pill(
                 ("bar-slot", ix),
                 icon,
+                label,
+                tint,
                 selected,
                 cx.entity().downgrade(),
                 move |this, window, cx| this.apply_slot(ix, window, cx),
@@ -913,6 +1004,102 @@ impl Launcher {
             }
         }
     }
+
+    /// Human label shown alongside the slot icon in the source bar.
+    /// "UnionAll" collapses to "All" so the union tab reads as the
+    /// combined view rather than whatever arbitrary name the registry
+    /// gave the union source (usually "all" / "launch").
+    fn slot_label(&self, slot: BarSlot) -> String {
+        match slot {
+            BarSlot::UnionAll(_) => "All".into(),
+            BarSlot::Registry(i) => short_label(self.registry.get(i).name()),
+            BarSlot::UnionChild(i, j) => {
+                let children = self.registry.get(i).source.sub_sources();
+                children
+                    .get(j)
+                    .map(|m| short_label(m.name))
+                    .unwrap_or_else(|| short_label(self.registry.get(i).name()))
+            }
+        }
+    }
+
+    /// Collect `(prefix_char, short_name)` pairs for rendering as chip
+    /// hints next to the search input. Walks the registry in registration
+    /// order, and for union sources expands out to each child's prefix (so
+    /// e.g. `@ win` and `> apps` both show up even though they're children
+    /// of a single union). Deduped by prefix char; first occurrence wins.
+    fn prefix_hints(&self) -> Vec<(char, String)> {
+        let mut out: Vec<(char, String)> = Vec::new();
+        let mut seen: std::collections::HashSet<char> = std::collections::HashSet::new();
+        for entry in self.registry.entries() {
+            let children = entry.source.sub_sources();
+            if children.is_empty() {
+                if let Some(ch) = entry.source.prefix() {
+                    if seen.insert(ch) {
+                        out.push((ch, shorten_source_name(entry.source.name())));
+                    }
+                }
+            } else {
+                for meta in children {
+                    if let Some(ch) = meta.prefix {
+                        if seen.insert(ch) {
+                            out.push((ch, shorten_source_name(meta.name)));
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Icon tint for a slot. UnionAll uses the generic accent; per-source
+    /// tabs route through `theme::category()` keyed on the source's name
+    /// (or the child's name for UnionChild).
+    fn slot_tint(&self, slot: BarSlot) -> Hsla {
+        match slot {
+            BarSlot::UnionAll(_) => theme::accent(),
+            BarSlot::Registry(i) => theme::category(self.registry.get(i).name()),
+            BarSlot::UnionChild(i, j) => {
+                let children = self.registry.get(i).source.sub_sources();
+                children
+                    .get(j)
+                    .map(|m| theme::category(m.name))
+                    .unwrap_or_else(theme::accent)
+            }
+        }
+    }
+}
+
+/// Uppercase the first character of `s`, leaving the rest untouched.
+/// First-char-only is fine for our source names ("apps" → "Apps").
+fn capitalize(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
+/// Compact form of a source name. Currently only "clipboard" gets
+/// trimmed — kept as a `match` so adding future abbreviations is a
+/// one-liner. Returns the lowercase short form; capitalisation is the
+/// caller's job (the source bar capitalises, the prefix chip row doesn't).
+fn short_source_name(name: &str) -> &str {
+    match name {
+        "clipboard" => "clip",
+        other => other,
+    }
+}
+
+/// Tab label: capitalised, abbreviated source name (e.g. `clipboard`
+/// → `Clip`). Used by the bottom source bar.
+fn short_label(name: &str) -> String {
+    capitalize(short_source_name(name))
+}
+
+/// Lowercase short label for prefix-hint chips next to the search input.
+fn shorten_source_name(name: &str) -> String {
+    short_source_name(name).to_string()
 }
 
 impl Render for Launcher {
@@ -1014,6 +1201,7 @@ impl Render for Launcher {
 
         let banner = self.source().banner();
         let source_bar = self.render_source_bar(cx);
+        let prefix_hints = self.prefix_hints();
 
         div()
             .key_context("Launcher")
@@ -1045,18 +1233,54 @@ impl Render for Launcher {
                     .border_1()
                     .border_color(theme::panel_border())
                     .overflow_hidden()
+                    // Global type stack for the launcher chrome — Fira Sans
+                    // for body, deliberately leaving monospace pills /
+                    // counter / kbd to opt into Fira Code per-element below.
+                    // GPUI doesn't accept a CSS-style fallback list, so we
+                    // commit to one family that's reliably installed on
+                    // Arch + most Linux desktops.
+                    .font_family("Fira Sans")
                     .on_mouse_down(MouseButton::Left, |_, _, _| {})
                     .child(
                         div()
                             .flex()
                             .items_center()
-                            .px(theme::PAD_X)
+                            .gap(px(14.0))
+                            .px(px(18.0))
                             .h(px(44.0))
                             .child(div().flex_1().child(self.text_input.clone()))
                             .child(
+                                // Prefix hint chips: dim pills reminding the
+                                // user which character jumps to which source.
+                                // Hidden when there are no registered prefixes.
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(8.0))
+                                    .flex_shrink_0()
+                                    .font_family("Fira Code")
+                                    .text_size(px(11.0))
+                                    .text_color(theme::fg_dim())
+                                    .children(prefix_hints.iter().map(|(ch, name)| {
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(4.0))
+                                            .px(px(6.0))
+                                            .py(px(2.0))
+                                            .rounded(px(3.0))
+                                            .bg(theme::kbd_bg())
+                                            .child(
+                                                div().text_color(theme::fg()).child(ch.to_string()),
+                                            )
+                                            .child(div().child(name.clone()))
+                                    })),
+                            )
+                            .child(
                                 div()
                                     .flex_shrink_0()
-                                    .text_size(theme::FONT_SIZE_SM)
+                                    .font_family("Fira Code")
+                                    .text_size(px(11.0))
                                     .text_color(theme::fg_dim())
                                     .child(pos),
                             ),
@@ -1066,36 +1290,39 @@ impl Render for Launcher {
                     .child(body)
                     .child(
                         div()
-                            .h(px(34.0))
+                            .h(px(44.0))
+                            .px(px(14.0))
                             .flex()
                             .items_center()
                             .justify_between()
+                            .gap(px(16.0))
                             .border_t_1()
                             .border_color(theme::bar_border())
+                            .bg(theme::panel_bg())
                             .text_size(theme::FONT_SIZE_SM)
                             .child(source_bar)
                             .child(
                                 div()
-                                    .pr(theme::PAD_X)
                                     .flex()
                                     .items_center()
-                                    .gap(px(16.0))
+                                    .gap(px(14.0))
                                     .child(key_hint(
                                         match self.left_pane {
                                             LeftPane::Items => "Mimes",
                                             LeftPane::Mimes => "Items",
                                         },
-                                        "tab",
+                                        &["tab"],
+                                        KEY_NORMAL,
                                     ))
-                                    .child(key_hint("Source", "ctrl-tab"))
+                                    .child(key_hint("Source", &["ctrl", "tab"], KEY_NORMAL))
                                     .when(self.source().can_peek(), |d| {
-                                        d.child(key_hint("Peek", "space"))
+                                        d.child(key_hint("Peek", &["space"], KEY_NORMAL))
                                     })
                                     .when(self.source().can_copy_image(), |d| {
-                                        d.child(key_hint("Copy", "ctrl-c"))
+                                        d.child(key_hint("Copy", &["⌃C"], KEY_NORMAL))
                                     })
-                                    .child(key_hint("Close", "esc"))
-                                    .child(key_hint("Activate", "enter")),
+                                    .child(key_hint("Close", &["esc"], KEY_NORMAL))
+                                    .child(key_hint("Activate", &["↵"], KEY_PRIMARY)),
                             ),
                     ),
             )
@@ -1115,12 +1342,14 @@ impl Focusable for Launcher {
 fn tab_pill(
     id: impl Into<gpui::ElementId>,
     icon: &'static str,
+    label: String,
+    tint: Hsla,
     selected: bool,
     entity: gpui::WeakEntity<Launcher>,
     on_click: impl Fn(&mut Launcher, &mut Window, &mut Context<Launcher>) + 'static,
 ) -> gpui::Stateful<gpui::Div> {
     let bg = if selected {
-        theme::selected_bg()
+        theme::accent_soft()
     } else {
         gpui::transparent_black()
     };
@@ -1129,17 +1358,46 @@ fn tab_pill(
     } else {
         theme::fg_dim()
     };
+    let border_color = if selected {
+        theme::accent()
+    } else {
+        // Transparent placeholder keeps every tab the same height so the
+        // underline appearing on selection doesn't shift its neighbours.
+        gpui::transparent_black()
+    };
     div()
         .id(id)
         .cursor_pointer()
         .px(px(8.0))
-        .py(px(2.0))
+        .py(px(4.0))
         .rounded(px(4.0))
+        .border_b_2()
+        .border_color(border_color)
         .bg(bg)
-        .text_size(px(15.0))
+        .text_size(theme::FONT_SIZE_SM)
         .text_color(fg)
         .hover(|s| s.bg(theme::hover_bg()))
-        .child(icon)
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        // Icon is rendered inside a fixed 16x16 chip so per-glyph metric
+        // differences (◉ vs ◱ vs ▣) don't translate to per-tab size jitter.
+        // Tint applies only to the glyph; label keeps fg/fg_dim so the
+        // selected state stays the dominant visual signal.
+        .child(
+            div()
+                .w(px(16.0))
+                .h(px(16.0))
+                .rounded(px(3.0))
+                .bg(theme::kbd_bg())
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(10.0))
+                .text_color(tint)
+                .child(icon),
+        )
+        .child(div().child(label))
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
             if let Some(this) = entity.upgrade() {
                 this.update(cx, |this, cx| on_click(this, window, cx));
@@ -1158,18 +1416,160 @@ fn img_el_for_peek(image: std::sync::Arc<gpui::Image>) -> AnyElement {
         .into_any_element()
 }
 
-fn key_hint(label: &str, key: &str) -> gpui::Div {
-    div()
+/// Title + status pills above the preview body. The whole thing is one
+/// row separated from the body by a bottom border — lines up with the
+/// search-bar separator style.
+fn preview_header(c: &PreviewChrome) -> gpui::Div {
+    let mut row = div()
+        .flex()
+        .items_center()
+        .gap(px(10.0))
+        .px(px(16.0))
+        .py(px(10.0))
+        .border_b_1()
+        .border_color(theme::panel_border())
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .text_size(px(14.0))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(theme::fg())
+                .child(c.title.clone()),
+        );
+    for pill in &c.pills {
+        row = row.child(render_pill(pill));
+    }
+    row
+}
+
+/// Single status pill: green on translucent green for `active=true`,
+/// neutral dim for everything else.
+fn render_pill(p: &PreviewPill) -> gpui::Div {
+    let (fg, bg) = if p.active {
+        (theme::pill_active_fg(), theme::pill_active_bg())
+    } else {
+        (theme::fg_dim(), theme::kbd_bg())
+    };
+    let mut row = div()
         .flex()
         .items_center()
         .gap(px(5.0))
-        .child(
+        .px(px(8.0))
+        .py(px(3.0))
+        .rounded(px(999.0))
+        .bg(bg)
+        .text_color(fg)
+        .text_size(px(11.0));
+    if p.active {
+        // Solid green dot to read as "live indicator", matching the
+        // status-led convention from the mockup.
+        row = row.child(
             div()
-                .text_color(theme::fg_accent())
-                .font_weight(FontWeight::MEDIUM)
-                .child(label.to_string()),
-        )
-        .child(div().text_color(theme::fg_dim()).child(key.to_string()))
+                .w(px(6.0))
+                .h(px(6.0))
+                .rounded(px(999.0))
+                .bg(theme::pill_active_fg()),
+        );
+    }
+    row.child(p.text.clone())
+}
+
+/// Bottom metadata strip: `(label, value)` pairs in a dim monospaced row.
+/// Caller is responsible for skipping this when `metadata` is empty —
+/// rendering an empty border would just leave a visual hairline.
+fn preview_metadata_strip(c: &PreviewChrome) -> gpui::Div {
+    let mut row = div()
+        .flex()
+        .gap(px(18.0))
+        .px(px(16.0))
+        .py(px(8.0))
+        .border_t_1()
+        .border_color(theme::panel_border())
+        .text_size(px(11.0))
+        .text_color(theme::fg_dim());
+    for (k, v) in &c.metadata {
+        row = row.child(
+            div()
+                .flex()
+                .gap(px(6.0))
+                .child(div().text_color(theme::fg()).child(k.clone()))
+                .child(div().child(v.clone())),
+        );
+    }
+    row
+}
+
+/// `primary=true` flag for [`key_hint`] — used for the dominant action
+/// (typically `Activate ↵`) so the bottom bar reads with a clear focal
+/// point. Named constants beat bare `true`/`false` at the call sites.
+const KEY_PRIMARY: bool = true;
+const KEY_NORMAL: bool = false;
+
+fn key_hint(label: &str, keys: &[&str], primary: bool) -> gpui::Div {
+    let label_color = if primary {
+        gpui::white()
+    } else {
+        theme::fg_accent()
+    };
+    let label_weight = if primary {
+        FontWeight::BOLD
+    } else {
+        FontWeight::MEDIUM
+    };
+
+    let key_bg = if primary {
+        theme::kbd_accent_bg()
+    } else {
+        theme::kbd_bg()
+    };
+    let key_fg = if primary {
+        theme::kbd_accent_fg()
+    } else {
+        theme::kbd_fg()
+    };
+    let key_border = if primary {
+        theme::kbd_accent_border()
+    } else {
+        theme::kbd_border()
+    };
+
+    let mut row = div().flex().items_center().gap(px(6.0)).child(
+        div()
+            .text_color(label_color)
+            .font_weight(label_weight)
+            .child(label.to_string()),
+    );
+    // Render each key as its own kbd pill so combos read as
+    // `ctrl` `tab` rather than one chunky `ctrl-tab` blob — matches
+    // the keycap convention from the mockup.
+    let kbd_row = div()
+        .flex()
+        .items_center()
+        .gap(px(2.0))
+        .children(keys.iter().map(|k| {
+            div()
+                .px(px(5.0))
+                .py(px(1.0))
+                .min_w(px(16.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(3.0))
+                .border_1()
+                .border_b_2()
+                .bg(key_bg)
+                .border_color(key_border)
+                .text_color(key_fg)
+                .text_size(px(10.5))
+                .font_family("Fira Code")
+                .child(k.to_string())
+        }));
+    row = row.child(kbd_row);
+    row
 }
 
 /// Subscribe to a source's growth pulses and re-render on each. Used by
@@ -1379,7 +1779,7 @@ mod tests {
         let slots = build_bar_slots(&r);
         let map = build_prefix_map(&r, &slots);
         assert_eq!(map.get(&'/'), Some(&1)); // Registry(1)
-        assert!(map.get(&'>').is_none());
+        assert!(!map.contains_key(&'>'));
     }
 
     #[test]

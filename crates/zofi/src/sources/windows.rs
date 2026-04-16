@@ -21,12 +21,13 @@
 //! a compositor.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use gpui::{div, prelude::*, AnyElement, FontWeight, Image, ImageFormat, ObjectFit};
 
-use crate::source::{ActivateOutcome, Layout, Preview, Source};
+use crate::source::{ActivateOutcome, Layout, Preview, PreviewChrome, PreviewPill, Source};
 use crate::sources::icon as shared_icon;
 use crate::theme;
 use crate::usage::UsageTracker;
@@ -128,6 +129,19 @@ pub struct WindowsSource {
     /// peek mode (1:1 overlay) and Ctrl+C image copy. Separate from `thumbs`
     /// so the preview pane keeps its aliasing-free pre-shrunk render.
     full_thumbs: ThumbnailMap,
+    /// Id of the most recently-activated window. Updated on every event
+    /// that reports `activated=true`, never cleared. Zofi itself steals
+    /// focus on launch so `row.activated` becomes false everywhere;
+    /// this sticky pointer lets the preview pane still mark the window
+    /// the user would return to by pressing esc. Sentinel `0` = none.
+    last_active: Arc<AtomicU64>,
+    /// Pre-zofi focused window from the compositor IPC, captured at
+    /// construction time (before zofi grabs focus). The wlr-foreign-toplevel
+    /// `State` event for the previously-focused window often arrives only
+    /// as `activated=false` once we've bound to the protocol, so this
+    /// snapshot is the reliable signal. Carries workspace info too so the
+    /// preview can show a `ws · N` pill alongside `active`.
+    pre_focus: Option<zwindows::compositor::FocusedWindow>,
 }
 
 impl WindowsSource {
@@ -157,10 +171,12 @@ impl WindowsSource {
         let (pulse_tx, pulse_rx) = async_channel::bounded::<()>(1);
         let memo: IconMemo = Arc::new(Mutex::new(HashMap::new()));
 
+        let last_active: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
         let items_for_thread = items.clone();
         let events = client.events.clone();
         let resolver_for_thread = resolver.clone();
         let memo_for_thread = memo.clone();
+        let last_active_for_thread = last_active.clone();
         std::thread::Builder::new()
             .name("zofi-windows".into())
             .spawn(move || {
@@ -172,6 +188,7 @@ impl WindowsSource {
                         ev,
                         resolver_for_thread.as_ref(),
                         &memo_for_thread,
+                        &last_active_for_thread,
                     );
                     // `try_send` coalesces: if the receiver hasn't drained
                     // yet, drop the extra tick. One pulse per frame is enough.
@@ -256,6 +273,14 @@ impl WindowsSource {
             })
             .expect("spawn zofi-windows-capture thread");
 
+        // Best-effort: snapshot the focused window via the compositor's IPC
+        // BEFORE the launcher takes input focus. The trait dispatches to
+        // sway / Hyprland / noop based on env detection; failures are
+        // silent — unsupported compositors just lose the "active" pill.
+        let ipc = zwindows::compositor::detect();
+        let pre_focus = ipc.focused_window();
+        tracing::debug!("pre-zofi focus: {pre_focus:?}");
+
         Self {
             items,
             activate_cb,
@@ -263,6 +288,8 @@ impl WindowsSource {
             tracker: None,
             thumbs,
             full_thumbs,
+            last_active,
+            pre_focus,
         }
     }
 
@@ -291,6 +318,8 @@ impl WindowsSource {
             tracker: None,
             thumbs: Arc::new(RwLock::new(HashMap::new())),
             full_thumbs: Arc::new(RwLock::new(HashMap::new())),
+            last_active: Arc::new(AtomicU64::new(0)),
+            pre_focus: None,
         }
     }
 
@@ -321,11 +350,15 @@ fn apply_event(
     ev: zwindows::ToplevelEvent,
     resolver: &(dyn Fn(&str) -> Option<WindowIcon> + Send + Sync),
     memo: &IconMemo,
+    last_active: &Arc<AtomicU64>,
 ) {
     use zwindows::ToplevelEvent::*;
     let mut guard = items.write().unwrap();
     match ev {
         Added(tl) | Updated(tl) => {
+            if tl.activated {
+                last_active.store(tl.id, Ordering::Relaxed);
+            }
             let app_id = tl.app_id.unwrap_or_default();
             let title = tl.title.unwrap_or_default();
             let icon = resolve_icon_memoised(&app_id, resolver, memo);
@@ -339,6 +372,8 @@ fn apply_event(
         }
         Removed(id) => {
             guard.retain(|r| r.id != id);
+            // Clear sticky pointer if the activated window just closed.
+            let _ = last_active.compare_exchange(id, 0, Ordering::Relaxed, Ordering::Relaxed);
         }
     }
 }
@@ -363,6 +398,48 @@ fn resolve_icon_memoised(
     resolved
 }
 
+/// Minimum length required for the shorter side of a partial app_id
+/// match. Below this we fall back to byte-exact equality only.
+const APP_ID_PARTIAL_MIN: usize = 4;
+
+/// True if the row at `(row_app, row_title)` is the same window as the
+/// compositor-reported focus at `(focus_app, focus_title)`. Titles must
+/// match exactly (case-insensitive); app_ids may differ as long as the
+/// shorter side is a *prefix* of the longer side AND the boundary in
+/// the longer side is a non-alphanumeric separator (space, hyphen, dot,
+/// paren, etc.). This admits the XWayland "Class (suffix)" pattern
+/// (`wechat` ⊂ `wechat (universal)`) without admitting `code` ⊂
+/// `vscode` — `vscode` doesn't start with `code`, and `code` is a
+/// suffix only by accidental tokenisation.
+fn focus_matches(row_app: &str, row_title: &str, focus_app: &str, focus_title: &str) -> bool {
+    if row_title.to_lowercase() != focus_title.to_lowercase() {
+        return false;
+    }
+    let row_app_l = row_app.to_lowercase();
+    let focus_app_l = focus_app.to_lowercase();
+    if row_app_l == focus_app_l {
+        return true;
+    }
+    let (short, long) = if row_app_l.len() <= focus_app_l.len() {
+        (row_app_l.as_str(), focus_app_l.as_str())
+    } else {
+        (focus_app_l.as_str(), row_app_l.as_str())
+    };
+    if short.len() < APP_ID_PARTIAL_MIN {
+        return false;
+    }
+    if !long.starts_with(short) {
+        return false;
+    }
+    // Boundary check: the character immediately after `short` in `long`
+    // must not extend a longer identifier. `wechat` ✓ `wechat (universal)`
+    // (next is space), but `firefox` ✗ `firefoxbeta` (next is alphanumeric
+    // letter).
+    long.as_bytes()
+        .get(short.len())
+        .is_none_or(|b| !b.is_ascii_alphanumeric())
+}
+
 fn row_update_in_place(dst: &mut WindowRow, src: WindowRow) {
     // Prefer the freshly-resolved icon (from the memo) but keep the previous
     // one if the new lookup somehow returned None — avoids flicker on Updated
@@ -380,7 +457,7 @@ impl Source for WindowsSource {
     }
 
     fn icon(&self) -> &'static str {
-        "🪟"
+        "◱"
     }
 
     fn prefix(&self) -> Option<char> {
@@ -507,6 +584,11 @@ impl Source for WindowsSource {
             }
         };
 
+        // Two-line label: title (or app_id fallback) on top, dim app_id
+        // subtitle underneath so the row carries WM-class context without
+        // the user needing to open the preview pane.
+        let subtitle = row.app_id.clone();
+
         div()
             .h_full()
             .px(theme::PAD_X)
@@ -518,21 +600,35 @@ impl Source for WindowsSource {
                 div()
                     .flex_1()
                     .min_w_0()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .text_size(theme::FONT_SIZE)
-                    .font_weight(if selected {
-                        FontWeight::MEDIUM
-                    } else {
-                        FontWeight::NORMAL
-                    })
-                    .text_color(if selected {
-                        theme::fg_accent()
-                    } else {
-                        theme::fg()
-                    })
-                    .child(row.display_label.clone()),
+                    .flex()
+                    .flex_col()
+                    .justify_center()
+                    .gap(gpui::px(1.0))
+                    .child(
+                        div()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .text_size(theme::FONT_SIZE)
+                            .font_weight(if selected {
+                                FontWeight::SEMIBOLD
+                            } else {
+                                FontWeight::NORMAL
+                            })
+                            .text_color(if selected { gpui::white() } else { theme::fg() })
+                            .child(row.display_label.clone()),
+                    )
+                    .when(!subtitle.is_empty(), |d| {
+                        d.child(
+                            div()
+                                .text_size(theme::FONT_SIZE_SM)
+                                .text_color(theme::fg_dim())
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .text_ellipsis()
+                                .child(subtitle),
+                        )
+                    }),
             )
             .into_any_element()
     }
@@ -576,6 +672,60 @@ impl Source for WindowsSource {
 
     fn can_copy_image(&self) -> bool {
         true
+    }
+
+    fn preview_chrome(&self, ix: usize) -> Option<PreviewChrome> {
+        let items = self.items.read().unwrap();
+        let row = items.get(ix)?;
+        // "active" pill: prefer the wlr-foreign-toplevel sticky pointer
+        // (works on any wlroots compositor), fall back to the sway IPC
+        // pre-zofi snapshot (works whenever sway is the compositor —
+        // covers the case where the toplevel state event for the
+        // previously-focused window only ever reports activated=false).
+        let last_id = self.last_active.load(Ordering::Relaxed);
+        let by_id = last_id == row.id;
+        // Loose match against the sway snapshot: case-insensitive titles
+        // must match exactly, and the app_id must agree by either:
+        //   - exact equality, or
+        //   - one being a prefix/suffix of the other AND the shorter side
+        //     being at least 4 chars long.
+        // The length floor and edge-anchoring kill the "code" ⊂ "vscode"
+        // class of false positives that an unrestricted contains() check
+        // produces, while still recognising `WeChat (Universal)` ⊃ `wechat`
+        // from XWayland.
+        let by_focus = self
+            .pre_focus
+            .as_ref()
+            .is_some_and(|f| focus_matches(&row.app_id, &row.title, &f.app_id, &f.title));
+        let is_active = by_id || by_focus;
+        let mut pills = Vec::new();
+        if is_active {
+            pills.push(PreviewPill {
+                text: "active".into(),
+                active: true,
+            });
+            // Workspace pill rides next to active — only meaningful for
+            // the focused window, sourced from the compositor IPC.
+            if let Some(ws) = self.pre_focus.as_ref().and_then(|f| f.workspace.as_deref()) {
+                pills.push(PreviewPill {
+                    text: format!("ws · {ws}"),
+                    active: false,
+                });
+            }
+        }
+        // app_id is what wlr-foreign-toplevel reports as the Wayland app id
+        // (for native clients) or the X11 WM_CLASS (for XWayland). Two-row
+        // layout matches the mockup's information density without faking
+        // a PID lookup we can't actually do per-row.
+        let metadata = vec![
+            ("App".into(), row.app_id.clone()),
+            ("ID".into(), format!("0x{:x}", row.id)),
+        ];
+        Some(PreviewChrome {
+            title: row.display_label.clone(),
+            pills,
+            metadata,
+        })
     }
 
     fn preview(&self, ix: usize) -> Option<Preview> {
@@ -636,7 +786,7 @@ mod tests {
     fn name_icon_placeholder_and_empty_text() {
         let (src, _) = fixture();
         assert_eq!(src.name(), "windows");
-        assert_eq!(src.icon(), "🪟");
+        assert_eq!(src.icon(), "◱");
         assert_eq!(src.placeholder(), "Search windows...");
         assert_eq!(src.empty_text(), "No windows");
     }
@@ -800,6 +950,10 @@ mod tests {
         Arc::new(Mutex::new(HashMap::new()))
     }
 
+    fn null_last_active() -> Arc<AtomicU64> {
+        Arc::new(AtomicU64::new(0))
+    }
+
     fn null_resolver_fn() -> impl Fn(&str) -> Option<WindowIcon> + Send + Sync {
         |_: &str| None
     }
@@ -833,6 +987,7 @@ mod tests {
             zwindows::ToplevelEvent::Added(toplevel(1, "firefox", "t")),
             &null_resolver_fn(),
             &null_memo(),
+            &null_last_active(),
         );
         let guard = items.read().unwrap();
         assert_eq!(guard.len(), 1);
@@ -854,6 +1009,7 @@ mod tests {
             }),
             &null_resolver_fn(),
             &null_memo(),
+            &null_last_active(),
         );
         let guard = items.read().unwrap();
         assert_eq!(guard.len(), 1, "update must not duplicate");
@@ -872,6 +1028,7 @@ mod tests {
             zwindows::ToplevelEvent::Removed(1),
             &null_resolver_fn(),
             &null_memo(),
+            &null_last_active(),
         );
         let guard = items.read().unwrap();
         assert_eq!(guard.len(), 1);
@@ -898,6 +1055,7 @@ mod tests {
             zwindows::ToplevelEvent::Added(toplevel(1, "Firefox", "t")),
             &resolver,
             &null_memo(),
+            &null_last_active(),
         );
         assert_eq!(calls.lock().unwrap().as_slice(), &["Firefox".to_string()]);
     }
@@ -913,6 +1071,7 @@ mod tests {
             zwindows::ToplevelEvent::Added(toplevel(1, "firefox", "t")),
             &resolver,
             &null_memo(),
+            &null_last_active(),
         );
         let guard = items.read().unwrap();
         let got = guard[0]
@@ -933,6 +1092,7 @@ mod tests {
             zwindows::ToplevelEvent::Added(toplevel(1, "nonexistent-app", "t")),
             &null_resolver_fn(),
             &null_memo(),
+            &null_last_active(),
         );
         assert!(items.read().unwrap()[0].icon_data.is_none());
     }
@@ -956,12 +1116,14 @@ mod tests {
             zwindows::ToplevelEvent::Added(toplevel(1, "firefox", "a")),
             &resolver,
             &memo,
+            &null_last_active(),
         );
         apply_event(
             &items,
             zwindows::ToplevelEvent::Added(toplevel(2, "firefox", "b")),
             &resolver,
             &memo,
+            &null_last_active(),
         );
         assert_eq!(*count.lock().unwrap(), 1);
     }
@@ -983,12 +1145,14 @@ mod tests {
             zwindows::ToplevelEvent::Added(toplevel(1, "firefox", "a")),
             &resolver,
             &memo,
+            &null_last_active(),
         );
         apply_event(
             &items,
             zwindows::ToplevelEvent::Added(toplevel(2, "kitty", "b")),
             &resolver,
             &memo,
+            &null_last_active(),
         );
         let got = seen.lock().unwrap().clone();
         assert_eq!(got, vec!["firefox".to_string(), "kitty".to_string()]);
@@ -1011,12 +1175,14 @@ mod tests {
             zwindows::ToplevelEvent::Added(toplevel(1, "ghost", "a")),
             &resolver,
             &memo,
+            &null_last_active(),
         );
         apply_event(
             &items,
             zwindows::ToplevelEvent::Updated(toplevel(1, "ghost", "b")),
             &resolver,
             &memo,
+            &null_last_active(),
         );
         assert_eq!(*count.lock().unwrap(), 1);
     }
@@ -1165,7 +1331,136 @@ mod tests {
             zwindows::ToplevelEvent::Added(toplevel(1, "", "unknown")),
             &resolver,
             &null_memo(),
+            &null_last_active(),
         );
         assert_eq!(*count.lock().unwrap(), 0);
+    }
+
+    // ------------------------------------------------------------------
+    // last_active sticky pointer tests
+    // ------------------------------------------------------------------
+
+    fn activated_toplevel(id: u64, app_id: &str, title: &str) -> zwindows::Toplevel {
+        let mut tl = toplevel(id, app_id, title);
+        tl.activated = true;
+        tl
+    }
+
+    #[test]
+    fn apply_event_sets_last_active_on_activated() {
+        let items: Arc<RwLock<Vec<WindowRow>>> = Arc::new(RwLock::new(Vec::new()));
+        let last_active = null_last_active();
+        apply_event(
+            &items,
+            zwindows::ToplevelEvent::Added(activated_toplevel(7, "firefox", "t")),
+            &null_resolver_fn(),
+            &null_memo(),
+            &last_active,
+        );
+        assert_eq!(last_active.load(Ordering::Relaxed), 7);
+    }
+
+    #[test]
+    fn apply_event_keeps_last_active_when_not_activated() {
+        let items: Arc<RwLock<Vec<WindowRow>>> = Arc::new(RwLock::new(Vec::new()));
+        let last_active = Arc::new(AtomicU64::new(42));
+        apply_event(
+            &items,
+            zwindows::ToplevelEvent::Added(toplevel(7, "firefox", "t")),
+            &null_resolver_fn(),
+            &null_memo(),
+            &last_active,
+        );
+        assert_eq!(last_active.load(Ordering::Relaxed), 42);
+    }
+
+    #[test]
+    fn apply_event_clears_last_active_when_active_window_removed() {
+        let items: Arc<RwLock<Vec<WindowRow>>> = Arc::new(RwLock::new(Vec::new()));
+        let last_active = Arc::new(AtomicU64::new(7));
+        // Seed an existing row so the Removed branch finds something to drop.
+        apply_event(
+            &items,
+            zwindows::ToplevelEvent::Added(toplevel(7, "firefox", "t")),
+            &null_resolver_fn(),
+            &null_memo(),
+            &last_active,
+        );
+        apply_event(
+            &items,
+            zwindows::ToplevelEvent::Removed(7),
+            &null_resolver_fn(),
+            &null_memo(),
+            &last_active,
+        );
+        assert_eq!(last_active.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn apply_event_preserves_last_active_when_other_window_removed() {
+        let items: Arc<RwLock<Vec<WindowRow>>> = Arc::new(RwLock::new(Vec::new()));
+        let last_active = Arc::new(AtomicU64::new(7));
+        apply_event(
+            &items,
+            zwindows::ToplevelEvent::Added(toplevel(8, "kitty", "t")),
+            &null_resolver_fn(),
+            &null_memo(),
+            &last_active,
+        );
+        apply_event(
+            &items,
+            zwindows::ToplevelEvent::Removed(8),
+            &null_resolver_fn(),
+            &null_memo(),
+            &last_active,
+        );
+        assert_eq!(last_active.load(Ordering::Relaxed), 7);
+    }
+
+    // ------------------------------------------------------------------
+    // focus_matches loose-matching tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn focus_matches_exact_app_and_title() {
+        assert!(focus_matches("firefox", "Issues", "firefox", "Issues"));
+    }
+
+    #[test]
+    fn focus_matches_is_case_insensitive() {
+        assert!(focus_matches("Firefox", "Issues", "firefox", "issues"));
+    }
+
+    #[test]
+    fn focus_matches_rejects_when_titles_differ() {
+        assert!(!focus_matches("firefox", "A", "firefox", "B"));
+    }
+
+    #[test]
+    fn focus_matches_accepts_xwayland_prefix() {
+        // wlr-foreign-toplevel reports the WM_CLASS as "wechat" while
+        // sway sees the X11 title as `WeChat (Universal)`.
+        assert!(focus_matches(
+            "wechat (universal)",
+            "Chat",
+            "wechat",
+            "Chat"
+        ));
+    }
+
+    #[test]
+    fn focus_matches_rejects_short_substring_collision() {
+        // Pre-fix: "code" was a 4-letter substring of "vscode" so the old
+        // double-contains check would fire even though they are different
+        // applications. Length floor is 4; both apps are exactly 4+, but
+        // neither is a prefix/suffix of the other, so reject.
+        assert!(!focus_matches("code", "doc", "vscode", "doc"));
+    }
+
+    #[test]
+    fn focus_matches_rejects_below_length_floor() {
+        // "vi" ⊂ "vim" by substring, but ≤3 chars is too short to be a
+        // safe partial match.
+        assert!(!focus_matches("vi", "f", "vim", "f"));
     }
 }
