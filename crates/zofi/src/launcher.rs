@@ -389,14 +389,27 @@ impl Launcher {
     }
 
     /// Reset TextInput after a source switch and notify for repaint.
+    /// The text_input write is deferred: this fn is reached from the
+    /// `cx.observe(&text_input, ...)` callback chain, which may still be
+    /// inside text_input's own update() lock — synchronously calling
+    /// `text_input.update` from there panics with "already being updated".
+    /// Deferring also keeps the case where we're invoked from a non-input
+    /// callback (tab click / empty backspace) correct: the closure runs
+    /// next tick on a clean stack.
     fn finish_slot_switch(&mut self, cx: &mut Context<Self>) {
         let placeholder = self.source().placeholder();
         self.last_query = String::new();
-        self.text_input.update(cx, |input, cx| {
-            input.set_placeholder(placeholder);
-            input.set_text("", cx);
+        let text_input = self.text_input.clone();
+        let entity = cx.entity().downgrade();
+        cx.defer(move |cx| {
+            text_input.update(cx, |input, cx| {
+                input.set_placeholder(placeholder);
+                input.set_text("", cx);
+            });
+            if let Some(this) = entity.upgrade() {
+                this.update(cx, |_, cx| cx.notify());
+            }
         });
-        cx.notify();
     }
 
     /// Full slot activation with focus restore. Used by bar tab clicks and
