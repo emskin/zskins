@@ -994,13 +994,13 @@ impl Launcher {
     fn slot_label(&self, slot: BarSlot) -> String {
         match slot {
             BarSlot::UnionAll(_) => "All".into(),
-            BarSlot::Registry(i) => capitalize(self.registry.get(i).name()),
+            BarSlot::Registry(i) => short_label(self.registry.get(i).name()),
             BarSlot::UnionChild(i, j) => {
                 let children = self.registry.get(i).source.sub_sources();
                 children
                     .get(j)
-                    .map(|m| capitalize(m.name))
-                    .unwrap_or_else(|| capitalize(self.registry.get(i).name()))
+                    .map(|m| short_label(m.name))
+                    .unwrap_or_else(|| short_label(self.registry.get(i).name()))
             }
         }
     }
@@ -1059,6 +1059,15 @@ fn capitalize(s: &str) -> String {
     match chars.next() {
         Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
         None => String::new(),
+    }
+}
+
+/// Tab label: capitalized source name, but trim "clipboard" → "Clip" so
+/// the bottom bar stays compact (matches the mockup).
+fn short_label(name: &str) -> String {
+    match name {
+        "clipboard" => "Clip".into(),
+        other => capitalize(other),
     }
 }
 
@@ -1203,13 +1212,20 @@ impl Render for Launcher {
                     .border_1()
                     .border_color(theme::panel_border())
                     .overflow_hidden()
+                    // Global type stack for the launcher chrome — Fira Sans
+                    // for body, deliberately leaving monospace pills /
+                    // counter / kbd to opt into Fira Code per-element below.
+                    // GPUI doesn't accept a CSS-style fallback list, so we
+                    // commit to one family that's reliably installed on
+                    // Arch + most Linux desktops.
+                    .font_family("Fira Sans")
                     .on_mouse_down(MouseButton::Left, |_, _, _| {})
                     .child(
                         div()
                             .flex()
                             .items_center()
-                            .gap(px(10.0))
-                            .px(theme::PAD_X)
+                            .gap(px(14.0))
+                            .px(px(18.0))
                             .h(px(44.0))
                             .child(div().flex_1().child(self.text_input.clone()))
                             .child(
@@ -1219,17 +1235,18 @@ impl Render for Launcher {
                                 div()
                                     .flex()
                                     .items_center()
-                                    .gap(px(6.0))
+                                    .gap(px(8.0))
                                     .flex_shrink_0()
-                                    .text_size(theme::FONT_SIZE_SM)
+                                    .font_family("Fira Code")
+                                    .text_size(px(11.0))
                                     .text_color(theme::fg_dim())
                                     .children(prefix_hints.iter().map(|(ch, name)| {
                                         div()
                                             .flex()
                                             .items_center()
-                                            .gap(px(3.0))
-                                            .px(px(5.0))
-                                            .py(px(1.0))
+                                            .gap(px(4.0))
+                                            .px(px(6.0))
+                                            .py(px(2.0))
                                             .rounded(px(3.0))
                                             .bg(theme::kbd_bg())
                                             .child(
@@ -1243,7 +1260,8 @@ impl Render for Launcher {
                             .child(
                                 div()
                                     .flex_shrink_0()
-                                    .text_size(theme::FONT_SIZE_SM)
+                                    .font_family("Fira Code")
+                                    .text_size(px(11.0))
                                     .text_color(theme::fg_dim())
                                     .child(pos),
                             ),
@@ -1272,18 +1290,18 @@ impl Render for Launcher {
                                             LeftPane::Items => "Mimes",
                                             LeftPane::Mimes => "Items",
                                         },
-                                        "tab",
+                                        &["tab"],
                                         false,
                                     ))
-                                    .child(key_hint("Source", "ctrl-tab", false))
+                                    .child(key_hint("Source", &["ctrl", "tab"], false))
                                     .when(self.source().can_peek(), |d| {
-                                        d.child(key_hint("Peek", "space", false))
+                                        d.child(key_hint("Peek", &["space"], false))
                                     })
                                     .when(self.source().can_copy_image(), |d| {
-                                        d.child(key_hint("Copy", "ctrl-c", false))
+                                        d.child(key_hint("Copy", &["⌃C"], false))
                                     })
-                                    .child(key_hint("Close", "esc", false))
-                                    .child(key_hint("Activate", "enter", true)),
+                                    .child(key_hint("Close", &["esc"], false))
+                                    .child(key_hint("Activate", &["↵"], true)),
                             ),
                     ),
             )
@@ -1464,7 +1482,7 @@ fn preview_metadata_strip(c: &PreviewChrome) -> gpui::Div {
     row
 }
 
-fn key_hint(label: &str, key: &str, primary: bool) -> gpui::Div {
+fn key_hint(label: &str, keys: &[&str], primary: bool) -> gpui::Div {
     let label_color = if primary {
         gpui::white()
     } else {
@@ -1493,22 +1511,28 @@ fn key_hint(label: &str, key: &str, primary: bool) -> gpui::Div {
     };
 
 
-    div()
+    let mut row = div()
         .flex()
         .items_center()
-        .gap(px(5.0))
+        .gap(px(6.0))
         .child(
             div()
                 .text_color(label_color)
                 .font_weight(label_weight)
                 .child(label.to_string()),
-        )
-        .child(
-            // kbd-style pill: subtle border with a thicker bottom edge so it
-            // reads like a physical keycap rather than flat text.
+        );
+    // Render each key as its own kbd pill so combos read as
+    // `ctrl` `tab` rather than one chunky `ctrl-tab` blob — matches
+    // the keycap convention from the mockup.
+    let kbd_row = div().flex().items_center().gap(px(2.0)).children(
+        keys.iter().map(|k| {
             div()
                 .px(px(5.0))
                 .py(px(1.0))
+                .min_w(px(16.0))
+                .flex()
+                .items_center()
+                .justify_center()
                 .rounded(px(3.0))
                 .border_1()
                 .border_b_2()
@@ -1516,8 +1540,12 @@ fn key_hint(label: &str, key: &str, primary: bool) -> gpui::Div {
                 .border_color(key_border)
                 .text_color(key_fg)
                 .text_size(px(10.5))
-                .child(key.to_string()),
-        )
+                .font_family("Fira Code")
+                .child(k.to_string())
+        }),
+    );
+    row = row.child(kbd_row);
+    row
 }
 
 /// Subscribe to a source's growth pulses and re-render on each. Used by
