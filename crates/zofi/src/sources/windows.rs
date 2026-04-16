@@ -380,7 +380,7 @@ impl Source for WindowsSource {
     }
 
     fn icon(&self) -> &'static str {
-        "🪟"
+        "◱"
     }
 
     fn prefix(&self) -> Option<char> {
@@ -534,12 +534,12 @@ impl Source for WindowsSource {
                             .text_ellipsis()
                             .text_size(theme::FONT_SIZE)
                             .font_weight(if selected {
-                                FontWeight::MEDIUM
+                                FontWeight::SEMIBOLD
                             } else {
                                 FontWeight::NORMAL
                             })
                             .text_color(if selected {
-                                theme::fg_accent()
+                                gpui::white()
                             } else {
                                 theme::fg()
                             })
@@ -680,7 +680,7 @@ mod tests {
     fn name_icon_placeholder_and_empty_text() {
         let (src, _) = fixture();
         assert_eq!(src.name(), "windows");
-        assert_eq!(src.icon(), "🪟");
+        assert_eq!(src.icon(), "◱");
         assert_eq!(src.placeholder(), "Search windows...");
         assert_eq!(src.empty_text(), "No windows");
     }

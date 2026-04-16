@@ -67,7 +67,7 @@ pub fn accent() -> Hsla {
     rgb(0x4f8cff).into()
 }
 pub fn accent_soft() -> Hsla {
-    rgb_alpha(0x4f8cff, 0.12)
+    rgb_alpha(0x4f8cff, 0.22)
 }
 
 // Preview pane: slightly darker than the panel to suggest a separate surface.

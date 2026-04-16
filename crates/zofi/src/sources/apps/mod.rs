@@ -44,7 +44,7 @@ impl Source for AppsSource {
     }
 
     fn icon(&self) -> &'static str {
-        "🚀"
+        "▣"
     }
 
     fn prefix(&self) -> Option<char> {
@@ -100,12 +100,12 @@ impl Source for AppsSource {
                             .text_ellipsis()
                             .text_size(theme::FONT_SIZE)
                             .font_weight(if selected {
-                                FontWeight::MEDIUM
+                                FontWeight::SEMIBOLD
                             } else {
                                 FontWeight::NORMAL
                             })
                             .text_color(if selected {
-                                theme::fg_accent()
+                                gpui::white()
                             } else {
                                 theme::fg()
                             })
