@@ -909,10 +909,12 @@ impl Launcher {
         // navigation into one row — there are no nested levels to discover.
         for (ix, slot) in self.slots.iter().enumerate() {
             let icon = self.slot_icon(*slot);
+            let label = self.slot_label(*slot);
             let selected = ix == self.active_slot;
             let tab = tab_pill(
                 ("bar-slot", ix),
                 icon,
+                label,
                 selected,
                 cx.entity().downgrade(),
                 move |this, window, cx| this.apply_slot(ix, window, cx),
@@ -939,6 +941,34 @@ impl Launcher {
                     .unwrap_or(self.registry.get(i).icon())
             }
         }
+    }
+
+    /// Human label shown alongside the slot icon in the source bar.
+    /// "UnionAll" collapses to "All" so the union tab reads as the
+    /// combined view rather than whatever arbitrary name the registry
+    /// gave the union source (usually "all" / "launch").
+    fn slot_label(&self, slot: BarSlot) -> String {
+        match slot {
+            BarSlot::UnionAll(_) => "All".into(),
+            BarSlot::Registry(i) => capitalize(self.registry.get(i).name()),
+            BarSlot::UnionChild(i, j) => {
+                let children = self.registry.get(i).source.sub_sources();
+                children
+                    .get(j)
+                    .map(|m| capitalize(m.name))
+                    .unwrap_or_else(|| capitalize(self.registry.get(i).name()))
+            }
+        }
+    }
+}
+
+/// Uppercase the first character of `s`, leaving the rest untouched.
+/// First-char-only is fine for our source names ("apps" → "Apps").
+fn capitalize(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
     }
 }
 
@@ -1143,6 +1173,7 @@ impl Focusable for Launcher {
 fn tab_pill(
     id: impl Into<gpui::ElementId>,
     icon: &'static str,
+    label: String,
     selected: bool,
     entity: gpui::WeakEntity<Launcher>,
     on_click: impl Fn(&mut Launcher, &mut Window, &mut Context<Launcher>) + 'static,
@@ -1173,10 +1204,14 @@ fn tab_pill(
         .border_b_2()
         .border_color(border_color)
         .bg(bg)
-        .text_size(px(15.0))
+        .text_size(theme::FONT_SIZE_SM)
         .text_color(fg)
         .hover(|s| s.bg(theme::hover_bg()))
-        .child(icon)
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .child(div().text_size(px(15.0)).child(icon))
+        .child(div().child(label))
         .on_mouse_down(MouseButton::Left, move |_, window, cx| {
             if let Some(this) = entity.upgrade() {
                 this.update(cx, |this, cx| on_click(this, window, cx));
