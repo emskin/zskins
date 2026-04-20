@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use gpui::{AsyncApp, Task};
 use wayland_client::{
+    event_created_child,
     globals::{registry_queue_init, GlobalListContents},
     protocol::wl_registry,
     Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum,
@@ -89,6 +90,11 @@ impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for AppState {
 }
 
 impl Dispatch<ExtWorkspaceManagerV1, ()> for AppState {
+    event_created_child!(AppState, ExtWorkspaceManagerV1, [
+        ext_workspace_manager_v1::EVT_WORKSPACE_GROUP_OPCODE => (ExtWorkspaceGroupHandleV1, ()),
+        ext_workspace_manager_v1::EVT_WORKSPACE_OPCODE => (ExtWorkspaceHandleV1, ()),
+    ]);
+
     fn event(
         state: &mut Self,
         _: &ExtWorkspaceManagerV1,
