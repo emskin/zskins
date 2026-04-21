@@ -47,7 +47,16 @@ fn main() {
                         "no displays reported; opening a single bar without output targeting"
                     );
                     let tray = cx.new(|cx| bar::TrayModule::new(None, cx));
-                    open_bar(cx, backend.clone(), None, None, px(1920.), tray);
+                    let window_title = cx.new(bar::WindowTitleModule::new);
+                    open_bar(
+                        cx,
+                        backend.clone(),
+                        None,
+                        None,
+                        px(1920.),
+                        tray,
+                        window_title,
+                    );
                 } else {
                     tracing::info!("opening zbar on {} output(s)", displays.len());
                     // Create shared state that should NOT be duplicated per
@@ -56,6 +65,7 @@ fn main() {
                     // until a click-site-aware implementation lands.
                     let primary_display = displays.first().map(|d| d.id());
                     let tray = cx.new(|cx| bar::TrayModule::new(primary_display, cx));
+                    let window_title = cx.new(bar::WindowTitleModule::new);
                     // Cross-connection match: GPUI's `display.uuid()` is
                     // `Uuid::v5(NAMESPACE_DNS, name)`, so we invert by hashing
                     // each known output name and building a UUID->name map.
@@ -86,6 +96,7 @@ fn main() {
                             output_name,
                             width,
                             tray.clone(),
+                            window_title.clone(),
                         );
                     }
                 }
@@ -110,6 +121,7 @@ fn open_bar(
     output_name: Option<String>,
     width: gpui::Pixels,
     tray: gpui::Entity<bar::TrayModule>,
+    window_title: gpui::Entity<bar::WindowTitleModule>,
 ) {
     // Use the display's reported width so wgpu gets a valid initial surface.
     // Anchor::LEFT|RIGHT will still let the compositor adjust if needed.
@@ -133,7 +145,9 @@ fn open_bar(
             }),
             ..Default::default()
         },
-        |_, cx| cx.new(|cx| Bar::new(backend, display_id, output_name, tray, cx)),
+        |_, cx| {
+            cx.new(|cx| Bar::new(backend, display_id, output_name, tray, window_title, cx))
+        },
     );
     if let Err(e) = result {
         tracing::warn!("failed to open zbar window on display {display_id:?}: {e:#}");
