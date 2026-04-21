@@ -39,6 +39,8 @@ Wayland status bar built on GPUI (Zed's UI framework). Cargo workspace.
 - Wayland capture: `cargo run --example capture -p zwindows` to test per-toplevel capture without starting zofi
 - wayland-protocols crate: ext staging protocols live under `wayland_protocols::ext::` with `staging` feature flag (already enabled in workspace)
 - Multi-bar shared state: resources coordinating with the OS (wayland handles, DBus SNI host) must be single-instance. Pattern: create `Entity<T>` once in `main.rs`, clone into each Bar; or spawn the session via `std::sync::Once` on first `run()` and broadcast events to per-bar sinks (see `ExtWorkspaceBackend`). Per-bar instantiation of these will silently break after the first bar.
+- Generalized: any module opening an external IPC channel (DBus, sway socket, `niri msg` subprocess, wayland protocol handle) must be a single per-process instance. Create the `Entity<T>` once in `main.rs` and clone into each `Bar`. Per-bar instantiation spawns N copies of the connection/subprocess and usually misroutes events.
+- niri IPC: `niri msg --json event-stream` is a line-delimited JSON event stream (events include `WindowsChanged`, `WindowOpenedOrChanged`, `WindowFocusChanged`, `WorkspacesChanged`, `WorkspaceActivated`). One-shot queries: `niri msg --json focused-window`, `focused-output`, `workspaces`.
 - wayland-client `Dispatch` for any event carrying `new_id` MUST include `event_created_child!` — otherwise runtime panic "Missing event_created_child specialization". Covers ext_workspace_manager_v1, data_device, etc.
 - wayland-client proxies are `Send + Sync`; call request methods from any thread. Don't funnel requests through the event-loop thread via a mutex — `blocking_dispatch` won't wake on the outside change.
 
@@ -54,6 +56,7 @@ Wayland status bar built on GPUI (Zed's UI framework). Cargo workspace.
 - GPUI `DisplayId` and our backend's `wl_output` are on separate wayland connections — protocol IDs and enumeration order differ. Match by UUID: `display.uuid()` returns `Uuid::new_v5(NAMESPACE_DNS, name.as_bytes())`; compute the same in backend from `wl_output.name` (v4+, bind with `version.min(4)`).
 - niri uses ext-workspace-v1 with per-output groups; workspace `name` is the idx string ("1"…"N"). `$XDG_CURRENT_DESKTOP=niri`. `niri msg --json workspaces` dumps per-output state for debugging.
 - Multi-output ext-workspace: same workspace "name" exists in each group. Key handles by `(name, output)`, not `name` alone, and track `ExtWorkspaceGroupHandleV1::OutputEnter` + `WorkspaceEnter` to assemble the mapping.
+- `SWAYSOCK` env var often lingers from a previous sway session pointing at a dead socket. `env::var("SWAYSOCK").is_err()` is NOT enough — actually `UnixStream::connect(&path)` to verify before using sway IPC, otherwise fall through to the next backend.
 
 ## Worktree & Git
 - Root disk is tight; when running agents in git worktrees share target dir: `export CARGO_TARGET_DIR="$(git rev-parse --show-toplevel)/target"` (run from the main repo, before entering the worktree)
