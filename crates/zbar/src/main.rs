@@ -71,7 +71,7 @@ fn main() {
                     // each known output name and building a UUID->name map.
                     let uuid_to_name: std::collections::HashMap<uuid::Uuid, String> = sway_widths
                         .iter()
-                        .map(|(n, _)| (output_name_uuid(n), n.clone()))
+                        .map(|(n, _)| (zbar::backend::output_name_uuid(n), n.clone()))
                         .collect();
                     let name_to_width: std::collections::HashMap<String, f32> =
                         sway_widths.iter().cloned().collect();
@@ -104,14 +104,6 @@ fn main() {
         })
         .detach();
     });
-}
-
-/// GPUI derives `PlatformDisplay::uuid()` from the wl_output name using
-/// `Uuid::new_v5(NAMESPACE_DNS, name.as_bytes())` — see gpui_linux's
-/// `WaylandDisplay::uuid`. We mirror that so backend-side `wl_output.name`
-/// values can be matched to GPUI displays across separate connections.
-fn output_name_uuid(name: &str) -> uuid::Uuid {
-    uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_DNS, name.as_bytes())
 }
 
 fn open_bar(

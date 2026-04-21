@@ -186,11 +186,13 @@ impl WorkspaceBackend for SwayBackend {
     }
 
     fn activate(&self, id: &WorkspaceId, output: Option<&str>) {
-        // Quote the workspace name so names containing spaces/special chars
-        // survive sway's command parser. Output names are known-safe tokens.
+        // Quote both tokens so anything surprising in a user-configured
+        // workspace/output name survives sway's command parser. Compositor-
+        // reported output names are normally safe (e.g. `DP-1`), but quoting
+        // costs nothing and keeps the injection surface closed.
         let ws_name = sway_quote(&id.0);
         let cmd = match output {
-            Some(out) => format!("focus output {out}; workspace {ws_name}"),
+            Some(out) => format!("focus output {}; workspace {}", sway_quote(out), ws_name),
             None => format!("workspace {ws_name}"),
         };
         std::thread::spawn(move || {
@@ -283,5 +285,35 @@ fn run_session(sink: &EventSink) -> Result<()> {
                 EventAction::Ignore => {}
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sway_quote;
+
+    #[test]
+    fn sway_quote_wraps_plain_names() {
+        assert_eq!(sway_quote("1"), "\"1\"");
+        assert_eq!(sway_quote("DP-1"), "\"DP-1\"");
+        assert_eq!(sway_quote("web"), "\"web\"");
+    }
+
+    #[test]
+    fn sway_quote_escapes_backslashes_and_quotes() {
+        // Backslashes double; quotes are prefixed with a backslash. This
+        // matches sway's string-escape convention.
+        assert_eq!(sway_quote(r#"with"quote"#), r#""with\"quote""#);
+        assert_eq!(sway_quote(r"back\slash"), r#""back\\slash""#);
+        assert_eq!(sway_quote(r#"\"both"#), r#""\\\"both""#);
+    }
+
+    #[test]
+    fn sway_quote_preserves_spaces_and_semicolons() {
+        // These are not special to sway's string parser; they're only
+        // dangerous if the name is spliced UNQUOTED. The quoting call site
+        // is what neutralizes them.
+        assert_eq!(sway_quote("a b"), "\"a b\"");
+        assert_eq!(sway_quote("kill;reboot"), "\"kill;reboot\"");
     }
 }
