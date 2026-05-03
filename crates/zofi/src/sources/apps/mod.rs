@@ -60,17 +60,23 @@ impl Source for AppsSource {
     }
 
     fn filter(&self, query: &str) -> Vec<usize> {
-        let q = query.to_lowercase();
-        if q.is_empty() {
-            (0..self.entries.len()).collect()
-        } else {
-            self.entries
-                .iter()
-                .enumerate()
-                .filter(|(_, e)| e.search_key.contains(&q))
-                .map(|(i, _)| i)
-                .collect()
-        }
+        self.filter_scored(query)
+            .into_iter()
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    fn filter_scored(&self, query: &str) -> Vec<(usize, i32)> {
+        // Match against the original-cased name + file_stem so users can find
+        // an app by either ("calc" → "Calculator", "gnome.calc" → file stem).
+        // nucleo's smart-case handles both case-insensitive and case-aware
+        // queries without us pre-lowercasing.
+        let haystacks: Vec<String> = self
+            .entries
+            .iter()
+            .map(|e| format!("{} {}", e.name, e.file_stem))
+            .collect();
+        crate::fuzzy::match_indices(query, &haystacks)
     }
 
     fn render_item(&self, ix: usize, selected: bool) -> AnyElement {

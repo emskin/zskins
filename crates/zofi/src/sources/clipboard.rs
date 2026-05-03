@@ -58,9 +58,11 @@ impl ClipboardSource {
                 Vec::new()
             }
         };
+        // Original case — nucleo's smart-case picks the right behavior per
+        // query (lowercase needle = case-insensitive, mixed-case = exact).
         let search_keys = entries
             .iter()
-            .map(|e| e.preview.clone().unwrap_or_default().to_lowercase())
+            .map(|e| e.preview.clone().unwrap_or_default())
             .collect();
         let images = entries.iter().map(decode_image).collect();
         tracing::info!(
@@ -110,16 +112,14 @@ impl Source for ClipboardSource {
     }
 
     fn filter(&self, query: &str) -> Vec<usize> {
-        if query.is_empty() {
-            return (0..self.entries.len()).collect();
-        }
-        let q = query.to_lowercase();
-        self.search_keys
-            .iter()
-            .enumerate()
-            .filter(|(_, k)| k.contains(&q))
+        self.filter_scored(query)
+            .into_iter()
             .map(|(i, _)| i)
             .collect()
+    }
+
+    fn filter_scored(&self, query: &str) -> Vec<(usize, i32)> {
+        crate::fuzzy::match_indices(query, &self.search_keys)
     }
 
     fn render_item(&self, ix: usize, selected: bool) -> AnyElement {

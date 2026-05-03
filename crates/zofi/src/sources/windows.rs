@@ -59,12 +59,9 @@ pub struct WindowRow {
     /// Preloaded icon bytes. `None` when app-id has no matching icon-theme
     /// entry or icon loading failed — we still show the row, just without art.
     pub icon_data: Option<WindowIcon>,
-    /// Pre-lowercased `app_id` / `title` so scoring doesn't allocate on every
-    /// keystroke.
-    pub app_id_lc: String,
-    pub title_lc: String,
-    /// Lowercase `app_id + " " + title`. Pre-computed so `filter` is a cheap
-    /// substring scan instead of repeatedly lowercasing on every keystroke.
+    /// `"{app_id} {title}"` (original case). Fed to the fuzzy matcher,
+    /// which applies smart-case + subsequence scoring without us having
+    /// to pre-lowercase or pick a tier ladder.
     pub search_key: String,
     /// Rendered label (`"app_id — title"`). Pre-computed so `render_item`
     /// doesn't allocate per frame.
@@ -73,9 +70,7 @@ pub struct WindowRow {
 
 impl WindowRow {
     fn build(id: u64, app_id: String, title: String, activated: bool) -> Self {
-        let app_id_lc = app_id.to_lowercase();
-        let title_lc = title.to_lowercase();
-        let search_key = format!("{app_id_lc} {title_lc}");
+        let search_key = format!("{app_id} {title}");
         // Icon already conveys the app; prefer the title (the user-distinguishing
         // bit). Fall back to app_id only when the window has no title yet.
         let display_label = if title.is_empty() {
@@ -89,8 +84,6 @@ impl WindowRow {
             title,
             activated,
             icon_data: None,
-            app_id_lc,
-            title_lc,
             search_key,
             display_label,
         }
@@ -476,43 +469,16 @@ impl Source for WindowsSource {
     }
 
     fn filter(&self, query: &str) -> Vec<usize> {
-        let items = self.items.read().unwrap();
-        if query.is_empty() {
-            return (0..items.len()).collect();
-        }
-        let q = query.to_lowercase();
-        items
-            .iter()
-            .enumerate()
-            .filter(|(_, r)| r.search_key.contains(&q))
+        self.filter_scored(query)
+            .into_iter()
             .map(|(i, _)| i)
             .collect()
     }
 
     fn filter_scored(&self, query: &str) -> Vec<(usize, i32)> {
         let items = self.items.read().unwrap();
-        if query.is_empty() {
-            return (0..items.len()).map(|i| (i, 0)).collect();
-        }
-        let q = query.to_lowercase();
-        let mut out = Vec::new();
-        for (i, row) in items.iter().enumerate() {
-            // Scoring priority: app-id prefix > title prefix > app-id
-            // substring > title substring. Higher score = better match.
-            let score = if row.app_id_lc.starts_with(&q) {
-                30
-            } else if row.title_lc.starts_with(&q) {
-                20
-            } else if row.app_id_lc.contains(&q) {
-                15
-            } else if row.title_lc.contains(&q) {
-                10
-            } else {
-                continue;
-            };
-            out.push((i, score));
-        }
-        out
+        let haystacks: Vec<&str> = items.iter().map(|r| r.search_key.as_str()).collect();
+        crate::fuzzy::match_indices(query, &haystacks)
     }
 
     fn weight(&self, ix: usize) -> i32 {
@@ -836,8 +802,13 @@ mod tests {
     fn filter_substring_matches_app_id() {
         let (src, _) = fixture();
         assert_eq!(src.filter("fire"), vec![0]);
-        // Case-insensitive: upper-case query matches lower-case app_id.
-        assert_eq!(src.filter("FIRE"), vec![0]);
+        // Smart-case: an all-lowercase needle matches regardless of haystack
+        // case. (Mixed-case needles intentionally become case-sensitive — see
+        // `filter_uppercase_needle_is_case_sensitive` for that direction.)
+        assert!(
+            src.filter("firefox").contains(&0),
+            "lowercase needle should still find Firefox"
+        );
     }
 
     #[test]
@@ -858,24 +829,48 @@ mod tests {
 
     #[test]
     fn filter_scored_prefix_beats_substring() {
+        // Concrete scores are the matcher's contract, not ours. Just assert
+        // that a prefix-quality match outscores a buried-substring match for
+        // the same row.
         let (src, _) = fixture();
-        // "fire" is a prefix of "firefox" (score 30); "ire" is only a
-        // substring of "firefox" (score 15).
         let prefix = src.filter_scored("fire");
         let substring = src.filter_scored("ire");
-        assert_eq!(prefix, vec![(0, 30)]);
-        assert_eq!(substring, vec![(0, 15)]);
+        let prefix_score = prefix
+            .iter()
+            .find(|(i, _)| *i == 0)
+            .map(|(_, s)| *s)
+            .expect("prefix query should find row 0");
+        let substr_score = substring
+            .iter()
+            .find(|(i, _)| *i == 0)
+            .map(|(_, s)| *s)
+            .expect("substring query should still find row 0");
+        assert!(
+            prefix_score > substr_score,
+            "prefix score {prefix_score} should exceed substring score {substr_score}",
+        );
     }
 
     #[test]
     fn filter_scored_title_prefix_beats_title_substring() {
-        // "Issues" is a title prefix on row 0 (score 20); "ues" is only a
-        // substring of that title (score 10).
+        // Same shape as the app-id case: relative ordering only.
         let (src, _) = fixture();
         let prefix = src.filter_scored("Issues");
-        assert_eq!(prefix, vec![(0, 20)]);
-        let substr = src.filter_scored("ues");
-        assert_eq!(substr, vec![(0, 10)]);
+        let substr = src.filter_scored("ssues");
+        let prefix_score = prefix
+            .iter()
+            .find(|(i, _)| *i == 0)
+            .map(|(_, s)| *s)
+            .expect("title-prefix query should find row 0");
+        let substr_score = substr
+            .iter()
+            .find(|(i, _)| *i == 0)
+            .map(|(_, s)| *s)
+            .expect("title-substring query should still find row 0");
+        assert!(
+            prefix_score > substr_score,
+            "title-prefix score {prefix_score} should exceed substring score {substr_score}",
+        );
     }
 
     #[test]
@@ -963,9 +958,11 @@ mod tests {
     }
 
     #[test]
-    fn window_row_build_assembles_search_key_lowercased() {
+    fn window_row_build_preserves_original_case_in_search_key() {
+        // Original case in the search_key — nucleo's smart-case applies
+        // case-insensitivity per query, no need to pre-lowercase here.
         let r = row(42, "Firefox", "My Title", false);
-        assert_eq!(r.search_key, "firefox my title");
+        assert_eq!(r.search_key, "Firefox My Title");
         // The icon already conveys the app — label shows just the title so
         // multiple foot/firefox windows stay visually distinguishable.
         assert_eq!(r.display_label, "My Title");

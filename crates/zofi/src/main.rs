@@ -1,5 +1,6 @@
 mod assets;
 mod clipd;
+mod fuzzy;
 mod highlight;
 mod input;
 mod launcher;
