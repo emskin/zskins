@@ -1260,7 +1260,11 @@ impl Render for Launcher {
                     .h(panel_h)
                     .flex()
                     .flex_col()
-                    .bg(t.bg)
+                    // Launcher is the modal focus surface — keep it fully
+                    // opaque so the wallpaper doesn't compete with list /
+                    // preview content. Bar (also reads `t.bg`) keeps its
+                    // semi-transparent frosted look.
+                    .bg(Hsla { a: 1.0, ..t.bg })
                     .rounded(theme::PANEL_RADIUS)
                     .border_1()
                     .border_color(t.border)
@@ -1329,7 +1333,7 @@ impl Render for Launcher {
                             .gap(px(16.0))
                             .border_t_1()
                             .border_color(theme::bar_border())
-                            .bg(t.bg)
+                            .bg(Hsla { a: 1.0, ..t.bg })
                             .text_size(theme::FONT_SIZE_SM)
                             .child(source_bar)
                             .child(
