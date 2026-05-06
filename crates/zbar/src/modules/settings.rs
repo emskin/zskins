@@ -28,7 +28,8 @@ pub struct SettingsModule {
 }
 
 impl SettingsModule {
-    pub fn new(display_id: Option<DisplayId>) -> Self {
+    pub fn new(display_id: Option<DisplayId>, cx: &mut Context<Self>) -> Self {
+        cx.observe_global::<Theme>(|_, cx| cx.notify()).detach();
         Self {
             display_id,
             popup: None,
@@ -101,6 +102,7 @@ pub struct SettingsPopup {
 
 impl SettingsPopup {
     fn new(cx: &mut Context<Self>) -> Self {
+        cx.observe_global::<Theme>(|_, cx| cx.notify()).detach();
         Self {
             focus_handle: cx.focus_handle(),
         }

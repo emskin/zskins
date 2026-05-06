@@ -204,6 +204,8 @@ impl TrayModule {
         let (activate_tx, activate_rx) = async_channel::bounded::<ActivateReq>(8);
         let (menu_click_tx, menu_click_rx) = async_channel::bounded::<tray_menu::MenuClickReq>(8);
 
+        cx.observe_global::<Theme>(|_, cx| cx.notify()).detach();
+
         cx.spawn(async move |this, cx| {
             while let Ok(msg) = rx.recv().await {
                 if this

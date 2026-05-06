@@ -22,6 +22,7 @@ enum BatteryStatus {
 impl BatteryModule {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let device = find_battery();
+        cx.observe_global::<Theme>(|_, cx| cx.notify()).detach();
         cx.spawn(async move |this, cx| loop {
             cx.background_executor()
                 .timer(Duration::from_secs(30))

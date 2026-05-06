@@ -21,6 +21,8 @@ impl NetworkModule {
         let (tx, rx) = async_channel::bounded::<NetEvent>(8);
         net_info::spawn_netlink_worker(tx);
 
+        cx.observe_global::<Theme>(|_, cx| cx.notify()).detach();
+
         cx.spawn(async move |this, cx| {
             while let Ok(evt) = rx.recv().await {
                 if this

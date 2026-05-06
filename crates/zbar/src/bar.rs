@@ -39,6 +39,7 @@ impl Bar {
         window_title: Entity<WindowTitleModule>,
         cx: &mut Context<Self>,
     ) -> Self {
+        cx.observe_global::<Theme>(|_, cx| cx.notify()).detach();
         Bar {
             workspaces: cx.new(|cx| WorkspacesModule::new(backend, output_name, cx)),
             // WindowTitleModule subscribes to a compositor IPC stream (sway
@@ -54,7 +55,7 @@ impl Bar {
             battery: cx.new(BatteryModule::new),
             cpu_mem: cx.new(CpuMemModule::new),
             clock: cx.new(ClockModule::new),
-            settings: cx.new(|_| SettingsModule::new(display_id)),
+            settings: cx.new(|cx| SettingsModule::new(display_id, cx)),
         }
     }
 }

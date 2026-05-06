@@ -251,6 +251,7 @@ impl Launcher {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        cx.observe_global::<Theme>(|_, cx| cx.notify()).detach();
         // Wire pulses for every source up-front. Sources are built before the
         // launcher (in main) so we can't lazy-init them here, and async
         // sources need their pulse channel hooked into our cx the moment they

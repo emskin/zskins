@@ -23,6 +23,8 @@ impl BrightnessModule {
 
         let percent = read_brightness(device.as_deref(), max_brightness);
 
+        cx.observe_global::<Theme>(|_, cx| cx.notify()).detach();
+
         cx.spawn(async move |this, cx| loop {
             cx.background_executor().timer(Duration::from_secs(5)).await;
             let cached = this.read_with(cx, |m, _| (m.device.clone(), m.max_brightness));

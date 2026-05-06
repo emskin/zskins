@@ -41,6 +41,9 @@ impl WindowTitleModule {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let (tx, rx) = async_channel::bounded::<Option<String>>(16);
 
+        cx.observe_global::<ztheme::Theme>(|_, cx| cx.notify())
+            .detach();
+
         match detect_title_source() {
             TitleSource::None => return WindowTitleModule { title: None },
             TitleSource::Sway => {

@@ -31,6 +31,7 @@ pub struct NetworkPopup {
 impl NetworkPopup {
     pub fn new(rx: async_channel::Receiver<NetEvent>, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
+        cx.observe_global::<Theme>(|_, cx| cx.notify()).detach();
         cx.spawn(async move |this, cx| {
             while let Ok(evt) = rx.recv().await {
                 if this.update(cx, |m, cx| m.handle_event(evt, cx)).is_err() {

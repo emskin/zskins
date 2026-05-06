@@ -11,6 +11,7 @@ pub struct ClockModule {
 impl ClockModule {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let text = Local::now().format("%H:%M").to_string();
+        cx.observe_global::<Theme>(|_, cx| cx.notify()).detach();
         cx.spawn(async move |this, cx| loop {
             let now = Local::now();
             let secs_until_next_min = (60u64).saturating_sub(now.second() as u64).max(1);

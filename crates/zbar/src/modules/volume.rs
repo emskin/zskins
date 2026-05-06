@@ -23,6 +23,8 @@ impl VolumeModule {
         let (percent, muted) = read_volume();
         let (tx, rx) = async_channel::bounded::<(Option<u32>, bool)>(4);
 
+        cx.observe_global::<Theme>(|_, cx| cx.notify()).detach();
+
         cx.spawn(async move |this, cx| {
             while let Ok((percent, muted)) = rx.recv().await {
                 if this

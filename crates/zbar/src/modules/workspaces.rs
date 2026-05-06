@@ -21,6 +21,9 @@ impl WorkspacesModule {
         output_name: Option<String>,
         cx: &mut Context<Self>,
     ) -> Self {
+        cx.observe_global::<ztheme::Theme>(|_, cx| cx.notify())
+            .detach();
+
         let Some(backend) = backend else {
             return WorkspacesModule {
                 state: WorkspaceState::default(),

@@ -243,6 +243,7 @@ impl TrayMenuPopup {
         close_tx: async_channel::Sender<super::tray::TrayMsg>,
         cx: &mut Context<Self>,
     ) -> Self {
+        cx.observe_global::<Theme>(|_, cx| cx.notify()).detach();
         Self {
             items,
             stack: Vec::new(),
