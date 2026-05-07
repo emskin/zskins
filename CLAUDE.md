@@ -43,6 +43,10 @@ Wayland status bar built on GPUI (Zed's UI framework). Cargo workspace.
 - niri IPC: `niri msg --json event-stream` is a line-delimited JSON event stream (events include `WindowsChanged`, `WindowOpenedOrChanged`, `WindowFocusChanged`, `WorkspacesChanged`, `WorkspaceActivated`). One-shot queries: `niri msg --json focused-window`, `focused-output`, `workspaces`.
 - wayland-client `Dispatch` for any event carrying `new_id` MUST include `event_created_child!` — otherwise runtime panic "Missing event_created_child specialization". Covers ext_workspace_manager_v1, data_device, etc.
 - wayland-client proxies are `Send + Sync`; call request methods from any thread. Don't funnel requests through the event-loop thread via a mutex — `blocking_dispatch` won't wake on the outside change.
+- GPUI globals: `cx.refresh_windows()` only marks windows dirty — it does NOT re-render child Entities. Every Entity that depends on a `Global` must register `cx.observe_global::<T>(|_, cx| cx.notify()).detach()` in its `new()`, otherwise `cx.set_global` is silent for that subtree.
+- Theme: shared via `crates/ztheme/` (16-token `Theme` as gpui Global, Catppuccin Mocha/Latte presets, atomic toml IO + `notify` watcher). Per-crate `theme.rs` only keeps product-specific tokens (BAR_HEIGHT, PANEL_W, kind_*, kbd_*, category()). Config: `$XDG_CONFIG_HOME/zskins/config.toml` with `[theme] name = "..."`.
+- Cross-thread global propagation (GPUI main → background): bridge via `Arc<RwLock<T>>` for state + bounded `async_channel<()>` for signal. Background thread reads state on signal; bounded channel + dedup on writer means dropped signals are harmless. See `crates/zbar/src/modules/tray.rs` `FgHexState` for a worked example.
+- GPUI source for API lookup (no public docs): `~/.cargo/git/checkouts/zed-*/crates/gpui/src/{app.rs,window.rs,app/context.rs}`
 
 ## Gotchas
 - GPUI `.cached()` API requires explicit size styles (e.g. `size_full()`); content-sized views collapse
@@ -60,4 +64,4 @@ Wayland status bar built on GPUI (Zed's UI framework). Cargo workspace.
 
 ## Worktree & Git
 - Root disk is tight; when running agents in git worktrees share target dir: `export CARGO_TARGET_DIR="$(git rev-parse --show-toplevel)/target"` (run from the main repo, before entering the worktree)
-- Commits are auto-pushed via a hook; `git status` shows "up to date with origin" right after commit — no manual `git push` needed
+- Commits are auto-pushed via a hook; `git status` shows "up to date with origin" right after commit — no manual `git push` needed. Caveat: the hook does NOT push tags, and occasionally misses merge commits — push those explicitly (`git push origin <tag>`, `git push`).
