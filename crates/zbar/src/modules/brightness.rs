@@ -426,7 +426,12 @@ fn strip_card_prefix(s: &str) -> Option<&str> {
 /// Returns `None` when the file is missing, too short, or no `0xFC`
 /// descriptor is present.
 fn read_edid_product_name(path: &std::path::Path) -> Option<String> {
-    let bytes = fs::read(path).ok()?;
+    parse_edid_product_name(&fs::read(path).ok()?)
+}
+
+/// Parse a binary EDID blob and return the "Display Product Name"
+/// (descriptor type `0xFC`). Pure function — no I/O.
+fn parse_edid_product_name(bytes: &[u8]) -> Option<String> {
     if bytes.len() < 128 {
         return None;
     }
@@ -499,5 +504,87 @@ impl Render for BrightnessModule {
             .gap_0p5()
             .child(div().text_color(t.accent).child(icon.to_string()))
             .child(theme::pct_label(pct, t.fg_dim))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_edid_product_name, strip_card_prefix};
+
+    #[test]
+    fn strip_card_prefix_extracts_connector() {
+        assert_eq!(strip_card_prefix("card0-HDMI-A-1"), Some("HDMI-A-1"));
+        assert_eq!(strip_card_prefix("card1-DP-2"), Some("DP-2"));
+        assert_eq!(strip_card_prefix("card12-eDP-1"), Some("eDP-1"));
+    }
+
+    #[test]
+    fn strip_card_prefix_rejects_invalid() {
+        assert_eq!(strip_card_prefix("HDMI-A-1"), None);
+        assert_eq!(strip_card_prefix("cardX-A-1"), None); // non-digit after `card`
+        assert_eq!(strip_card_prefix("card0HDMI"), None); // no `-` separator
+        assert_eq!(strip_card_prefix("card0"), None);
+    }
+
+    /// Build a 128-byte EDID with a 0xFC descriptor in block `idx` (0..4)
+    /// containing `name` (truncated to 13 bytes, padded with 0x0A + 0x20).
+    fn edid_with_name(idx: usize, name: &str) -> Vec<u8> {
+        let mut edid = vec![0u8; 128];
+        let block = 54 + idx * 18;
+        // d[0..3] = 0 (descriptor marker), d[3] = 0xFC (type), d[4] = 0.
+        edid[block + 3] = 0xFC;
+        let bytes = name.as_bytes();
+        let n = bytes.len().min(13);
+        edid[block + 5..block + 5 + n].copy_from_slice(&bytes[..n]);
+        if n < 13 {
+            edid[block + 5 + n] = 0x0A;
+            for b in &mut edid[block + 5 + n + 1..block + 18] {
+                *b = 0x20;
+            }
+        }
+        edid
+    }
+
+    #[test]
+    fn parses_product_name_from_first_descriptor() {
+        let edid = edid_with_name(0, "JZM27DC");
+        assert_eq!(parse_edid_product_name(&edid).as_deref(), Some("JZM27DC"));
+    }
+
+    #[test]
+    fn parses_product_name_from_later_descriptor() {
+        let edid = edid_with_name(2, "Dell U2720Q");
+        assert_eq!(parse_edid_product_name(&edid).as_deref(), Some("Dell U2720Q"));
+    }
+
+    #[test]
+    fn rejects_short_edid() {
+        assert_eq!(parse_edid_product_name(&[0u8; 64]), None);
+    }
+
+    #[test]
+    fn rejects_edid_without_product_descriptor() {
+        let edid = vec![0u8; 128];
+        assert_eq!(parse_edid_product_name(&edid), None);
+    }
+
+    #[test]
+    fn skips_detailed_timing_descriptors() {
+        // d[0..2] != 0 marks a detailed timing block, not a name descriptor.
+        let mut edid = vec![0u8; 128];
+        edid[54] = 0x12; // pixel clock low byte non-zero
+        edid[54 + 3] = 0xFC; // would-be name type, but should be ignored
+        // Real name in the second block.
+        let block2 = 72;
+        edid[block2 + 3] = 0xFC;
+        edid[block2 + 5..block2 + 5 + 6].copy_from_slice(b"REAL27");
+        edid[block2 + 5 + 6] = 0x0A;
+        assert_eq!(parse_edid_product_name(&edid).as_deref(), Some("REAL27"));
+    }
+
+    #[test]
+    fn trims_trailing_padding() {
+        let edid = edid_with_name(0, "BENQ  "); // trailing spaces before pad
+        assert_eq!(parse_edid_product_name(&edid).as_deref(), Some("BENQ"));
     }
 }

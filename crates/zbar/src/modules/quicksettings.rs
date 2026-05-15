@@ -2118,3 +2118,63 @@ impl QuickSettingsPanel {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{bt_icon, signal_bars, split_nmcli_columns};
+
+    #[test]
+    fn bt_icon_maps_known_classes() {
+        assert_eq!(bt_icon("audio-headphones"), "\u{f025f}");
+        assert_eq!(bt_icon("audio-headset"), "\u{f025f}");
+        assert_eq!(bt_icon("audio-speakers"), "\u{f057e}");
+        assert_eq!(bt_icon("input-keyboard"), "\u{f030c}");
+        assert_eq!(bt_icon("input-mouse"), "\u{f037d}");
+        assert_eq!(bt_icon("phone-smart"), "\u{f011c}");
+    }
+
+    #[test]
+    fn bt_icon_falls_back_to_generic() {
+        assert_eq!(bt_icon(""), "\u{f00af}");
+        assert_eq!(bt_icon("nonexistent-class"), "\u{f00af}");
+    }
+
+    #[test]
+    fn signal_bars_buckets_percent() {
+        assert_eq!(signal_bars(0), 1);
+        assert_eq!(signal_bars(39), 1);
+        assert_eq!(signal_bars(40), 2);
+        assert_eq!(signal_bars(69), 2);
+        assert_eq!(signal_bars(70), 3);
+        assert_eq!(signal_bars(100), 3);
+    }
+
+    #[test]
+    fn split_nmcli_columns_basic() {
+        let line = "*:MyNetwork:75:WPA2";
+        let cols = split_nmcli_columns(line);
+        assert_eq!(cols, vec!["*", "MyNetwork", "75", "WPA2"]);
+    }
+
+    #[test]
+    fn split_nmcli_columns_handles_escaped_colon_in_ssid() {
+        // nmcli -t escapes ':' inside SSIDs as `\:` — must not split there.
+        let line = " :Café\\:Wifi:60:WPA2";
+        let cols = split_nmcli_columns(line);
+        assert_eq!(cols, vec![" ", "Café:Wifi", "60", "WPA2"]);
+    }
+
+    #[test]
+    fn split_nmcli_columns_empty_fields_preserved() {
+        let line = "::::";
+        let cols = split_nmcli_columns(line);
+        assert_eq!(cols, vec!["", "", "", "", ""]);
+    }
+
+    #[test]
+    fn split_nmcli_columns_open_network_blank_security() {
+        let line = " :OpenNet:50:";
+        let cols = split_nmcli_columns(line);
+        assert_eq!(cols, vec![" ", "OpenNet", "50", ""]);
+    }
+}
