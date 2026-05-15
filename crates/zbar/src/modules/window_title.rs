@@ -233,6 +233,20 @@ fn run_niri_title_session(
     }
 }
 
+impl Render for WindowTitleModule {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let text = self.title.clone().unwrap_or_default();
+        let t = cx.global::<ztheme::Theme>();
+        div()
+            .max_w(px(500.))
+            .overflow_x_hidden()
+            .text_ellipsis()
+            .whitespace_nowrap()
+            .text_color(t.fg_dim)
+            .child(text)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::NiriTitleTracker;
@@ -324,19 +338,5 @@ mod tests {
         }));
         let title = t.apply(&json!({ "WorkspacesChanged": {"workspaces": []} }));
         assert_eq!(title.as_deref(), Some("A"));
-    }
-}
-
-impl Render for WindowTitleModule {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let text = self.title.clone().unwrap_or_default();
-        let t = cx.global::<ztheme::Theme>();
-        div()
-            .max_w(px(500.))
-            .overflow_x_hidden()
-            .text_ellipsis()
-            .whitespace_nowrap()
-            .text_color(t.fg_dim)
-            .child(text)
     }
 }

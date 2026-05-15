@@ -18,7 +18,7 @@ fn parses_get_workspaces_into_state() {
             output: Some("eDP-1".to_string()),
         }
     );
-    assert_eq!(state.workspaces[2].urgent, true);
+    assert!(state.workspaces[2].urgent);
     assert_eq!(state.workspaces[2].name, "3:web".to_string());
     assert_eq!(state.workspaces[2].output.as_deref(), Some("eDP-1"));
 }

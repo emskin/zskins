@@ -364,8 +364,18 @@ fn detect_source(cx: &App) -> Source {
     if !displays.is_empty() {
         // Stable ordering across runs.
         displays.sort_by(|a, b| a.connector.cmp(&b.connector));
+        for d in &displays {
+            tracing::info!(
+                "brightness: DDC display {} ({}) at {:?} -> {:?}",
+                d.model,
+                d.connector,
+                d.path,
+                d.display_id
+            );
+        }
         return Source::Ddci2c { displays };
     }
+    tracing::info!("brightness: no backlight or DDC-capable display found");
     Source::None
 }
 
