@@ -4,6 +4,7 @@ use super::panel::{QuickSettingsPanel, SliderKind, View};
 use super::{SLIDER_TRACK_LEFT_PX, SLIDER_TRACK_W_PX};
 use crate::modules::battery::BatteryStatus;
 use gpui::{div, prelude::*, px, App, Context, MouseButton, Window};
+use std::time::Duration;
 use ztheme::Theme;
 
 pub(super) fn pill<F>(
@@ -234,10 +235,26 @@ where
         .into_any_element()
 }
 
+/// Render a human "约 4 小时 12 分钟" / "约 35 分钟" string for a remaining
+/// duration. Returns `None` for durations under a minute.
+fn fmt_duration_zh(d: Duration) -> Option<String> {
+    let total_min = d.as_secs() / 60;
+    if total_min == 0 {
+        return None;
+    }
+    let (h, m) = (total_min / 60, total_min % 60);
+    Some(match (h, m) {
+        (0, m) => format!("约 {m} 分钟"),
+        (h, 0) => format!("约 {h} 小时"),
+        (h, m) => format!("约 {h} 小时 {m} 分钟"),
+    })
+}
+
 pub(super) fn render_battery_strip(
     cx: &mut Context<QuickSettingsPanel>,
     cap: u8,
     status: BatteryStatus,
+    time_remaining: Option<Duration>,
 ) -> gpui::AnyElement {
     let t = *cx.global::<Theme>();
     let cap_str = format!("{cap}%");
@@ -247,6 +264,32 @@ pub(super) fn render_battery_strip(
         BatteryStatus::Discharging => (None, t.fg),
         BatteryStatus::Unknown => (None, t.fg_dim),
     };
+    // Real estimate from the energy/power counters; the prefix follows the
+    // charge direction. Absent on Full/Unknown or when sysfs lacks the
+    // counters, in which case the secondary line is simply omitted.
+    let time_text = time_remaining.and_then(fmt_duration_zh).map(|s| match status {
+        BatteryStatus::Charging => format!("距充满 {s}"),
+        _ => format!("剩余 {s}"),
+    });
+    let mut info = div()
+        .flex_1()
+        .flex()
+        .items_baseline()
+        .gap(px(8.))
+        .child(
+            div()
+                .text_size(px(14.))
+                .text_color(t.fg)
+                .child(cap_str),
+        );
+    if let Some(time_text) = time_text {
+        info = info.child(
+            div()
+                .text_size(px(12.))
+                .text_color(t.fg_dim)
+                .child(time_text),
+        );
+    }
     let mut row = div()
         .flex()
         .items_center()
@@ -263,25 +306,7 @@ pub(super) fn render_battery_strip(
                 .text_color(icon_color)
                 .child("󰂄".to_string()),
         )
-        .child(
-            div()
-                .flex_1()
-                .flex()
-                .items_baseline()
-                .gap(px(8.))
-                .child(
-                    div()
-                        .text_size(px(14.))
-                        .text_color(t.fg)
-                        .child(cap_str),
-                )
-                .child(
-                    div()
-                        .text_size(px(12.))
-                        .text_color(t.fg_dim)
-                        .child("剩余约 4 小时 12 分".to_string()),
-                ),
-        );
+        .child(info);
     if let Some(label) = chip_text {
         row = row.child(
             div()

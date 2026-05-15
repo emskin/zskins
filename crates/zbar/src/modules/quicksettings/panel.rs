@@ -389,9 +389,47 @@ impl QuickSettingsPanel {
             (v.percent().unwrap_or(0), v.is_muted())
         };
         let vol_pct = vol_pct_raw.min(100);
-        let (bat_cap, bat_status) = {
+        let (bat_cap, bat_status, bat_time) = {
             let b = self.modules.battery.read(cx);
-            (b.capacity(), b.status())
+            (b.capacity(), b.status(), b.time_remaining())
+        };
+
+        // Bluetooth summary from the live snapshot (the shared client
+        // pushes one on spawn, so this is populated even on the Main view).
+        let bt_connected: Vec<&str> = self
+            .scans
+            .bt_devices
+            .iter()
+            .filter(|d| d.connected)
+            .map(|d| d.name.as_str())
+            .collect();
+        let bt_pill_sub = if !self.pills.bluetooth {
+            "已关闭".to_string()
+        } else if bt_connected.is_empty() {
+            "未连接".to_string()
+        } else {
+            format!("{} 已连接", bt_connected.len())
+        };
+        let bt_row_value = if !self.pills.bluetooth {
+            "已关闭".to_string()
+        } else if bt_connected.is_empty() {
+            "未连接设备".to_string()
+        } else {
+            bt_connected.join(" · ")
+        };
+
+        // Wi-Fi row value: the connected SSID when a scan has run,
+        // otherwise just the radio state.
+        let wifi_ssid = self
+            .scans
+            .wifi_networks
+            .iter()
+            .find(|n| n.connected)
+            .map(|n| n.ssid.clone());
+        let wifi_pill_sub = match (self.pills.wifi, &wifi_ssid) {
+            (false, _) => "已关闭".to_string(),
+            (true, Some(ssid)) => ssid.clone(),
+            (true, None) => "已开启".to_string(),
         };
 
         let pills = self.pills;
@@ -401,7 +439,7 @@ impl QuickSettingsPanel {
             cx,
             "󰖩",
             "Wi-Fi",
-            if pills.wifi { "已连接" } else { "已关闭" },
+            &wifi_pill_sub,
             pills.wifi,
             {
                 let entity = entity.clone();
@@ -418,11 +456,7 @@ impl QuickSettingsPanel {
             cx,
             "󰂯",
             "蓝牙",
-            if pills.bluetooth {
-                "2 已连接"
-            } else {
-                "已关闭"
-            },
+            &bt_pill_sub,
             pills.bluetooth,
             {
                 let entity = entity.clone();
@@ -464,7 +498,7 @@ impl QuickSettingsPanel {
             if pills.night_light {
                 "已开启"
             } else {
-                "23:00 自动"
+                "已关闭"
             },
             pills.night_light,
             {
@@ -540,10 +574,12 @@ impl QuickSettingsPanel {
         );
 
         // Rows: Wi-Fi, Bluetooth.
-        let wifi_value = if pills.wifi {
-            "eero-living-room · 已连接".to_string()
-        } else {
+        let wifi_value = if !pills.wifi {
             "已关闭".to_string()
+        } else if let Some(ssid) = wifi_ssid {
+            format!("{ssid} · 已连接")
+        } else {
+            "已开启".to_string()
         };
         let entity = cx.entity().clone();
         let wifi_row = nav_row(cx, "󰖩", "Wi-Fi", &wifi_value, {
@@ -555,7 +591,7 @@ impl QuickSettingsPanel {
                 });
             }
         });
-        let bt_row = nav_row(cx, "󰂯", "蓝牙", "AirPods Pro · Magic Trackpad", {
+        let bt_row = nav_row(cx, "󰂯", "蓝牙", &bt_row_value, {
             let entity = entity.clone();
             move |cx| {
                 entity.update(cx, |p, cx| {
@@ -566,7 +602,8 @@ impl QuickSettingsPanel {
         });
 
         // Battery strip — only render when a battery is actually present.
-        let battery_strip = bat_cap.map(|c| render_battery_strip(cx, c, bat_status));
+        let battery_strip =
+            bat_cap.map(|c| render_battery_strip(cx, c, bat_status, bat_time));
 
         // Footer: top border, 6px gap, flex:1 main button + two 36x36 icon
         // buttons (lock + power).
