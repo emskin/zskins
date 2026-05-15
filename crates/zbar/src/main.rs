@@ -40,6 +40,7 @@ fn main() {
         cx.bind_keys(zbar::modules::network_popup::key_bindings());
         cx.bind_keys(zbar::modules::tray_menu::key_bindings());
         cx.bind_keys(zbar::modules::settings::key_bindings());
+        cx.bind_keys(zbar::modules::quicksettings::key_bindings());
         let backend = backend.clone();
         let sway_widths = sway_widths.clone();
         // Wayland output events arrive asynchronously after bind; wait briefly so
@@ -56,6 +57,9 @@ fn main() {
                     );
                     let tray = cx.new(|cx| bar::TrayModule::new(None, cx));
                     let window_title = cx.new(bar::WindowTitleModule::new);
+                    let volume = cx.new(zbar::modules::volume::VolumeModule::new);
+                    let brightness = cx.new(zbar::modules::brightness::BrightnessModule::new);
+                    let battery = cx.new(zbar::modules::battery::BatteryModule::new);
                     open_bar(
                         cx,
                         backend.clone(),
@@ -64,6 +68,9 @@ fn main() {
                         px(1920.),
                         tray,
                         window_title,
+                        volume,
+                        brightness,
+                        battery,
                     );
                 } else {
                     tracing::info!("opening zbar on {} output(s)", displays.len());
@@ -74,6 +81,14 @@ fn main() {
                     let primary_display = displays.first().map(|d| d.id());
                     let tray = cx.new(|cx| bar::TrayModule::new(primary_display, cx));
                     let window_title = cx.new(bar::WindowTitleModule::new);
+                    // Single instance of resource-owning modules. Volume
+                    // spawns a long-lived `pactl subscribe` child; per-bar
+                    // instantiation would multiply that and leak zombies.
+                    // Brightness/Battery just poll /sys, but sharing keeps
+                    // the architecture uniform.
+                    let volume = cx.new(zbar::modules::volume::VolumeModule::new);
+                    let brightness = cx.new(zbar::modules::brightness::BrightnessModule::new);
+                    let battery = cx.new(zbar::modules::battery::BatteryModule::new);
                     // Cross-connection match: GPUI's `display.uuid()` is
                     // `Uuid::v5(NAMESPACE_DNS, name)`, so we invert by hashing
                     // each known output name and building a UUID->name map.
@@ -105,6 +120,9 @@ fn main() {
                             width,
                             tray.clone(),
                             window_title.clone(),
+                            volume.clone(),
+                            brightness.clone(),
+                            battery.clone(),
                         );
                     }
                 }
@@ -155,6 +173,7 @@ fn spawn_theme_watcher(cx: &mut App) {
     .detach();
 }
 
+#[allow(clippy::too_many_arguments)]
 fn open_bar(
     cx: &mut App,
     backend: Option<std::sync::Arc<dyn zbar::backend::WorkspaceBackend>>,
@@ -163,6 +182,9 @@ fn open_bar(
     width: gpui::Pixels,
     tray: gpui::Entity<bar::TrayModule>,
     window_title: gpui::Entity<bar::WindowTitleModule>,
+    volume: gpui::Entity<zbar::modules::volume::VolumeModule>,
+    brightness: gpui::Entity<zbar::modules::brightness::BrightnessModule>,
+    battery: gpui::Entity<zbar::modules::battery::BatteryModule>,
 ) {
     // Use the display's reported width so wgpu gets a valid initial surface.
     // Anchor::LEFT|RIGHT will still let the compositor adjust if needed.
@@ -186,7 +208,21 @@ fn open_bar(
             }),
             ..Default::default()
         },
-        |_, cx| cx.new(|cx| Bar::new(backend, display_id, output_name, tray, window_title, cx)),
+        |_, cx| {
+            cx.new(|cx| {
+                Bar::new(
+                    backend,
+                    display_id,
+                    output_name,
+                    tray,
+                    window_title,
+                    volume,
+                    brightness,
+                    battery,
+                    cx,
+                )
+            })
+        },
     );
     if let Err(e) = result {
         tracing::warn!("failed to open zbar window on display {display_id:?}: {e:#}");

@@ -123,6 +123,10 @@ impl NetworkModule {
             cx.notify();
         }
     }
+
+    pub fn interfaces(&self) -> &[IfaceSnapshot] {
+        &self.interfaces
+    }
 }
 
 fn physical_label(iface: &IfaceSnapshot) -> &str {

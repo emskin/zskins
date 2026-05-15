@@ -9,6 +9,7 @@ use zbar::modules::brightness::BrightnessModule;
 use zbar::modules::clock::ClockModule;
 use zbar::modules::cpu_mem::CpuMemModule;
 use zbar::modules::network::NetworkModule;
+use zbar::modules::quicksettings::QuickSettingsModule;
 use zbar::modules::settings::SettingsModule;
 pub use zbar::modules::tray::TrayModule;
 use zbar::modules::volume::VolumeModule;
@@ -29,18 +30,34 @@ pub struct Bar {
     cpu_mem: Entity<CpuMemModule>,
     clock: Entity<ClockModule>,
     settings: Entity<SettingsModule>,
+    quicksettings: Entity<QuickSettingsModule>,
 }
 
 impl Bar {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         backend: Option<Arc<dyn WorkspaceBackend>>,
         display_id: Option<DisplayId>,
         output_name: Option<String>,
         tray: Entity<TrayModule>,
         window_title: Entity<WindowTitleModule>,
+        volume: Entity<VolumeModule>,
+        brightness: Entity<BrightnessModule>,
+        battery: Entity<BatteryModule>,
         cx: &mut Context<Self>,
     ) -> Self {
         cx.observe_global::<Theme>(|_, cx| cx.notify()).detach();
+        let network = cx.new(|cx| NetworkModule::new(display_id, cx));
+        let quicksettings = cx.new(|cx| {
+            QuickSettingsModule::new(
+                display_id,
+                volume.clone(),
+                brightness.clone(),
+                battery.clone(),
+                network.clone(),
+                cx,
+            )
+        });
         Bar {
             display_id,
             workspaces: cx.new(|cx| WorkspacesModule::new(backend, output_name, cx)),
@@ -51,13 +68,14 @@ impl Bar {
             // so the same Entity is shared across all bars. GPUI renders it
             // correctly in every window, and `cx.notify()` re-renders them all.
             tray,
-            network: cx.new(|cx| NetworkModule::new(display_id, cx)),
-            volume: cx.new(VolumeModule::new),
-            brightness: cx.new(BrightnessModule::new),
-            battery: cx.new(BatteryModule::new),
+            network,
+            volume,
+            brightness,
+            battery,
             cpu_mem: cx.new(CpuMemModule::new),
             clock: cx.new(ClockModule::new),
             settings: cx.new(|cx| SettingsModule::new(display_id, cx)),
+            quicksettings,
         }
     }
 }
@@ -120,7 +138,9 @@ impl Render for Bar {
                     .child(separator(cx))
                     .child(self.clock.clone())
                     .child(separator(cx))
-                    .child(self.settings.clone()),
+                    .child(self.settings.clone())
+                    .child(separator(cx))
+                    .child(self.quicksettings.clone()),
             )
     }
 }

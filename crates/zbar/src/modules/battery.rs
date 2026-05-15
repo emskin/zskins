@@ -10,8 +10,8 @@ pub struct BatteryModule {
     device: Option<String>,
 }
 
-#[derive(Default, PartialEq, Clone)]
-enum BatteryStatus {
+#[derive(Default, PartialEq, Clone, Copy, Debug)]
+pub enum BatteryStatus {
     Charging,
     Discharging,
     Full,
@@ -50,6 +50,14 @@ impl BatteryModule {
             status,
             device,
         }
+    }
+
+    pub fn capacity(&self) -> Option<u8> {
+        self.capacity
+    }
+
+    pub fn status(&self) -> BatteryStatus {
+        self.status
     }
 }
 

@@ -50,6 +50,48 @@ impl VolumeModule {
 
         VolumeModule { percent, muted }
     }
+
+    /// Current volume percentage (0–100). `None` when unknown.
+    pub fn percent(&self) -> Option<u32> {
+        self.percent
+    }
+
+    /// Whether the default sink is muted.
+    pub fn is_muted(&self) -> bool {
+        self.muted
+    }
+
+    /// Set the default sink volume to `percent` (0–100). Uses `wpctl` when
+    /// available, falls back to `pactl`. The change is reflected by the
+    /// next `pactl subscribe` event, so we don't need to update local
+    /// state here.
+    pub fn set_percent(percent: u32) {
+        let pct = percent.min(150);
+        let use_wpctl = *HAS_WPCTL.get_or_init(|| {
+            Command::new("wpctl")
+                .arg("--version")
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        });
+        let _ = if use_wpctl {
+            Command::new("wpctl")
+                .args([
+                    "set-volume",
+                    "@DEFAULT_AUDIO_SINK@",
+                    &format!("{}%", pct),
+                ])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+        } else {
+            Command::new("pactl")
+                .args(["set-sink-volume", "@DEFAULT_SINK@", &format!("{}%", pct)])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+        };
+    }
 }
 
 fn run_pactl_subscribe(tx: async_channel::Sender<(Option<u32>, bool)>) {
@@ -75,13 +117,26 @@ fn run_pactl_session(tx: &async_channel::Sender<(Option<u32>, bool)>) -> Result<
         .spawn()?;
 
     let stdout = child.stdout.take().expect("stdout is piped");
-    let reader = std::io::BufReader::new(stdout);
+    let outcome = drive_pactl_lines(std::io::BufReader::new(stdout), tx);
 
+    // Reap the child on every exit path. Dropping `Child` without
+    // `wait()` leaves a zombie, and pipewire-pulse's per-user client
+    // connection limit (default 64) gets exhausted within hours when
+    // `pactl subscribe` keeps failing-and-retrying, locking every other
+    // PulseAudio client out (browsers, etc.).
+    let _ = child.kill();
+    let _ = child.wait();
+    outcome
+}
+
+fn drive_pactl_lines<R: BufRead>(
+    reader: R,
+    tx: &async_channel::Sender<(Option<u32>, bool)>,
+) -> Result<(), VolumeError> {
     for line in reader.lines() {
         let line = line?;
         if line.contains(" on sink #") {
             if tx.is_closed() {
-                let _ = child.kill();
                 return Ok(());
             }
             let _ = tx.try_send(read_volume());

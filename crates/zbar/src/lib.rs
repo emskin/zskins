@@ -1,4 +1,5 @@
 pub mod backend;
+pub mod bluetooth;
 pub mod modules;
 pub mod net_info;
 pub mod popup_catcher;

@@ -32,6 +32,11 @@ async-executor = "1"
 icon-theme.workspace = true
 uuid = { version = "1", features = ["v5"] }
 ztheme.workspace = true
+# Native DDC/CI over /dev/i2c-* — bypasses spawning `ddcutil` for every
+# brightness adjustment (~700ms → ~50ms per set), enabling smooth slider
+# drags on external monitors.
+ddc = "0.2"
+ddc-i2c = { version = "0.2", features = ["i2c-linux"] }
 
 [package.metadata.aur]
 depends = ["wayland", "vulkan-icd-loader", "libxkbcommon", "libxcb", "fontconfig", "freetype2", "mesa", "gtk4"]

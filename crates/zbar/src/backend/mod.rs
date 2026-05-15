@@ -60,6 +60,34 @@ pub fn output_name_uuid(name: &str) -> uuid::Uuid {
     uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_DNS, name.as_bytes())
 }
 
+/// Pair backend-side output names (e.g. `HDMI-A-1`) with GPUI's
+/// `DisplayId`s by hashing the name + matching against `display.uuid()`.
+/// Backend and GPUI run on separate wayland connections so direct id
+/// comparison is unreliable — this UUID bridge is the only correct way.
+pub fn name_to_display_id(
+    cx: &gpui::App,
+    names: impl IntoIterator<Item = impl AsRef<str>>,
+) -> std::collections::HashMap<String, gpui::DisplayId> {
+    let targets: Vec<(String, uuid::Uuid)> = names
+        .into_iter()
+        .map(|n| {
+            let s = n.as_ref().to_string();
+            let u = output_name_uuid(&s);
+            (s, u)
+        })
+        .collect();
+    let mut out = std::collections::HashMap::new();
+    for display in cx.displays() {
+        let Ok(uuid) = display.uuid() else { continue };
+        for (name, expected) in &targets {
+            if *expected == uuid {
+                out.insert(name.clone(), display.id());
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::output_name_uuid;
