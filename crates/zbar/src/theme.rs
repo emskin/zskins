@@ -15,7 +15,9 @@ pub const PADDING_X: Pixels = px(10.0);
 pub const MODULE_GAP: Pixels = px(4.0);
 pub const PILL_PX: Pixels = px(8.0);
 pub const PILL_PY: Pixels = px(3.0);
-const PCT_WIDTH: Pixels = px(28.0);
+// Wide enough for the widest label, "100%" — brightness sits there
+// routinely. A narrower box clips the leading "1", overlapping the icon.
+const PCT_WIDTH: Pixels = px(34.0);
 
 /// Hover-bg for a workspace pill in the active state. The shared `Theme`
 /// only carries one accent_soft slot; we want the workspace pill's hover
