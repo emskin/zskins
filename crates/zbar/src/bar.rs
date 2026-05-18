@@ -6,9 +6,9 @@ use std::sync::Arc;
 use zbar::backend::WorkspaceBackend;
 use zbar::modules::battery::BatteryModule;
 use zbar::modules::brightness::BrightnessModule;
-use zbar::modules::clock::ClockModule;
 use zbar::modules::cpu_mem::CpuMemModule;
 use zbar::modules::network::NetworkModule;
+// Clock lives inside the QuickSettings cluster; no standalone clock module.
 use zbar::modules::quicksettings::QuickSettingsModule;
 use zbar::modules::settings::SettingsModule;
 pub use zbar::modules::tray::TrayModule;
@@ -28,7 +28,6 @@ pub struct Bar {
     brightness: Entity<BrightnessModule>,
     battery: Entity<BatteryModule>,
     cpu_mem: Entity<CpuMemModule>,
-    clock: Entity<ClockModule>,
     settings: Entity<SettingsModule>,
     quicksettings: Entity<QuickSettingsModule>,
 }
@@ -73,7 +72,6 @@ impl Bar {
             brightness,
             battery,
             cpu_mem: cx.new(CpuMemModule::new),
-            clock: cx.new(ClockModule::new),
             settings: cx.new(|cx| SettingsModule::new(display_id, cx)),
             quicksettings,
         }
@@ -135,8 +133,6 @@ impl Render for Bar {
                     .child(separator(cx))
                     .child(self.cpu_mem.clone())
                     .child(self.battery.clone())
-                    .child(separator(cx))
-                    .child(self.clock.clone())
                     .child(separator(cx))
                     .child(self.settings.clone())
                     .child(separator(cx))
